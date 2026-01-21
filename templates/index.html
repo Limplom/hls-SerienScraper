@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HLS Video Downloader</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎬 HLS Video Downloader</h1>
+            <p class="subtitle">Simple • Fast • Reliable</p>
+        </header>
+
+        <main>
+            <!-- Series Catalog Section -->
+            <section class="card catalog-card" id="catalogSection">
+                <div class="card-header" style="cursor: pointer;" onclick="toggleCatalogSection()">
+                    <h2>
+                        <span id="catalogToggleIcon">▼</span> 🎬 Series Catalog
+                    </h2>
+                    <div class="catalog-controls" onclick="event.stopPropagation()">
+                        <select id="sourceSelector" class="source-selector" onchange="changeSource()">
+                            <option value="series">📺 Series</option>
+                            <option value="anime">🎌 Anime</option>
+                        </select>
+                        <button class="btn-small" onclick="toggleBatchMode()" id="batchModeBtn">
+                            📦 Batch Mode
+                        </button>
+                        <button class="btn-small" onclick="updateCatalog()" id="updateCatalogBtn">
+                            🔄 Check for Updates
+                        </button>
+                        <button class="btn-small" onclick="toggleGenreFilter()" id="genreFilterBtn">
+                            📑 Genre Filter
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Catalog Content (collapsible) -->
+                <div id="catalogContent" style="display: block;">
+
+                <!-- Batch Selection Bar (hidden by default) -->
+                <div id="batchSelectionBar" class="batch-selection-bar" style="display: none;">
+                    <div class="batch-info">
+                        <span id="batchSelectedCount">0 selected</span>
+                    </div>
+                    <div class="batch-actions">
+                        <button class="btn-small btn-primary" onclick="addSelectedToQueue(event)">
+                            ➕ Add to Queue
+                        </button>
+                        <button class="btn-small" onclick="clearBatchSelection()">
+                            ✕ Clear Selection
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Search Bar -->
+                <div class="catalog-search-container">
+                    <input type="text"
+                           id="catalogSearch"
+                           class="catalog-search-input"
+                           placeholder="🔍 Search series (name, genre)...">
+                    <button class="search-clear-btn" onclick="clearCatalogSearch()">✕</button>
+                </div>
+
+                <!-- Genre Filter Tabs (collapsible) -->
+                <div id="genreFilterTabs" class="genre-filter-tabs" style="display: none;">
+                    <button class="genre-tab active" data-genre="all">All</button>
+                    <!-- Dynamically populated with genres -->
+                </div>
+
+                <!-- Catalog Stats -->
+                <div class="catalog-stats">
+                    <span id="catalogTotalSeries">0 Series</span>
+                    <span id="catalogLastUpdate">Not loaded yet</span>
+                </div>
+
+                <!-- Series Grid with Slider -->
+                <div class="catalog-slider-container">
+                    <button class="catalog-slider-btn prev" onclick="scrollCatalog(-1)" title="Previous">‹</button>
+                    <div class="series-grid" id="seriesGrid">
+                        <p class="catalog-empty">Click "Check for Updates" to load the catalog</p>
+                    </div>
+                    <button class="catalog-slider-btn next" onclick="scrollCatalog(1)" title="Next">›</button>
+                </div>
+                </div>
+                <!-- End catalogContent -->
+            </section>
+
+            <!-- Quick Start Card -->
+            <section class="card quick-start-card" id="quickstart">
+                <div class="card-header">
+                    <h2>📥 Download</h2>
+                </div>
+
+                <!-- URL Input -->
+                <div class="form-group-compact">
+                    <label for="url">Series / Episode URL <span class="required">*</span></label>
+                    <div class="input-with-button">
+                        <input
+                            type="text"
+                            id="url"
+                            placeholder="http://186.2.175.5/serie/stream/seriesname/staffel-1/episode-1"
+                            class="form-control"
+                        >
+                        <button type="button" class="btn-icon" onclick="parseURLManually()" title="Analyze URL">
+                            🔍
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Quick Selection Grid -->
+                <div class="selection-grid">
+                    <!-- Audio Only Toggle -->
+                    <div class="selection-item audio-only-item">
+                        <label for="audio_only">Audio Only</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="audio_only" onchange="toggleAudioOnlyMode()">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+
+                    <!-- Quality / Audio Bitrate -->
+                    <div class="selection-item" id="qualityItem">
+                        <label id="qualityLabel">Quality</label>
+                        <select id="quality" class="form-control-small">
+                            <option value="best" selected>Best</option>
+                            <option value="1080p">1080p</option>
+                            <option value="720p">720p</option>
+                            <option value="480p">480p</option>
+                        </select>
+                        <!-- Audio Bitrate (hidden by default) -->
+                        <select id="audioBitrate" class="form-control-small" style="display: none;">
+                            <option value="0" selected>Best</option>
+                            <option value="320">320 kbps</option>
+                            <option value="256">256 kbps</option>
+                            <option value="192">192 kbps</option>
+                            <option value="128">128 kbps</option>
+                        </select>
+                    </div>
+
+                    <!-- Format / Audio Format -->
+                    <div class="selection-item" id="formatItem">
+                        <label id="formatLabel">Format</label>
+                        <select id="format" class="form-control-small">
+                            <option value="mkv" selected>MKV</option>
+                            <option value="mp4">MP4</option>
+                            <option value="avi">AVI</option>
+                        </select>
+                        <!-- Audio Format (hidden by default) -->
+                        <select id="audioFormat" class="form-control-small" style="display: none;">
+                            <option value="mp3" selected>MP3</option>
+                            <option value="flac">FLAC (Lossless)</option>
+                            <option value="aac">AAC</option>
+                            <option value="ogg">OGG Vorbis</option>
+                            <option value="wav">WAV (Uncompressed)</option>
+                            <option value="opus">Opus</option>
+                        </select>
+                    </div>
+
+                    <!-- Video Codec (hidden in audio mode) -->
+                    <div class="selection-item" id="codecItem">
+                        <label for="codec">Video Codec</label>
+                        <select id="codec" class="form-control-small">
+                            <option value="auto" selected>Automatic</option>
+                            <option value="h264">H.264 (AVC)</option>
+                            <option value="h265">H.265 (HEVC)</option>
+                            <option value="av1">AV1</option>
+                        </select>
+                    </div>
+
+                    <!-- Language Selection (hidden until URL parsed) -->
+                    <div class="selection-item" id="languageItem" style="display: none;">
+                        <label for="language">🌐 Language</label>
+                        <select id="language" class="form-control-small">
+                            <option value="" selected>Default</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Parsing Indicator -->
+                <div id="parsingIndicator" style="display: none; margin: 1rem 0;">
+                    <div class="parsing-loader">
+                        <span class="loader-spinner">⏳</span>
+                        <span>Analyzing URL...</span>
+                    </div>
+                </div>
+
+                <!-- Episode Selector (dynamically populated) -->
+                <div id="episodeSelector" style="display: none; margin-top: 1rem;">
+                    <!-- Will be filled by JavaScript -->
+                </div>
+
+                <!-- Main Action Button -->
+                <div class="action-buttons">
+                    <button id="startBtn" class="btn btn-primary btn-large" onclick="startDownload()">
+                        <span class="btn-icon-text">🚀</span>
+                        <span>Start Download</span>
+                    </button>
+                    <button class="btn-text" onclick="toggleAdvanced()">
+                        <span id="advancedToggleIcon">▼</span> Advanced Options
+                    </button>
+                </div>
+
+                <!-- Advanced Options (Collapsible) -->
+                <div id="advanced-options" class="advanced-options" style="display: none;">
+                    <div class="options-grid">
+                        <div class="option-item">
+                            <label for="wait">Wait Time (Seconds)</label>
+                            <input type="number" id="wait" value="60" min="30" max="120" class="form-control-small">
+                        </div>
+
+                        <div class="option-item">
+                            <label for="max_concurrent">Max Parallel Downloads</label>
+                            <input type="number" id="max_concurrent" value="3" min="1" max="10" class="form-control-small">
+                        </div>
+
+                        <div class="option-item">
+                            <label for="series_display">Override Series Name</label>
+                            <input type="text" id="series_display" placeholder="e.g. Invincible" class="form-control-small">
+                        </div>
+                    </div>
+
+                    <div class="options-checkboxes">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="english_title">
+                            <span>English Titles</span>
+                        </label>
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="force">
+                            <span>Overwrite</span>
+                        </label>
+                        <label class="checkbox-label" title="Automatically retry on errors (max 3x with increasing wait time)">
+                            <input type="checkbox" id="auto_retry" checked>
+                            <span>Auto-Retry</span>
+                        </label>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Unified Downloads Section (Status + Queue merged) -->
+            <section class="card downloads-card" id="downloadsSection" style="display: none;">
+                <div class="card-header">
+                    <h2>📥 Downloads</h2>
+                    <div class="log-controls">
+                        <button class="btn-small" onclick="consolidateAllDuplicates()" id="consolidateDuplicatesBtn" title="Merge duplicate series" style="display: none;">🔗 Merge</button>
+                        <button class="btn-small" onclick="toggleBulkDownloadMode()" id="bulkDownloadModeBtn" title="Select multiple">☑️ Multi-Select</button>
+                        <button class="btn-small" onclick="refreshQueue()" title="Refresh">🔄</button>
+                        <button class="btn-small" onclick="clearOldQueue()" title="Remove old">🗑️</button>
+                    </div>
+                </div>
+
+                <!-- Bulk Action Bar (hidden by default) -->
+                <div id="downloadBulkBar" class="bulk-action-bar download-bulk-bar" style="display: none;">
+                    <div class="bulk-info">
+                        <span id="downloadSelectedCount">0 selected</span>
+                    </div>
+                    <div class="bulk-actions">
+                        <button class="btn-small" onclick="selectAllDownloads()">☑️ All</button>
+                        <button class="btn-small" onclick="clearDownloadSelection()">✕ None</button>
+                        <button class="btn-small" onclick="bulkPauseDownloads()">⏸️ Pause</button>
+                        <button class="btn-small" onclick="bulkResumeDownloads()">▶️ Resume</button>
+                        <button class="btn-small btn-danger" onclick="bulkCancelDownloads()">❌ Cancel</button>
+                    </div>
+                </div>
+
+                <!-- Overall Statistics (Top Row) -->
+                <div class="downloads-stats">
+                    <!-- TOTAL Progress Block -->
+                    <div class="download-stat-card total">
+                        <div class="stat-header">
+                            <span class="stat-icon">📊</span>
+                            <span class="stat-title">TOTAL</span>
+                        </div>
+                        <div class="stat-progress-container">
+                            <div class="stat-progress-text" id="totalProgressText">0 / 0</div>
+                            <div class="stat-progress-bar">
+                                <div class="stat-progress-fill" id="totalProgressFill" style="width: 0%"></div>
+                            </div>
+                            <div class="stat-progress-percent" id="totalProgressPercent">0%</div>
+                        </div>
+                    </div>
+
+                    <!-- SUCCESS Count Block -->
+                    <div class="download-stat-card success">
+                        <div class="stat-header">
+                            <span class="stat-icon">✅</span>
+                            <span class="stat-title">SUCCESS</span>
+                        </div>
+                        <div class="stat-count-container">
+                            <div class="stat-count" id="totalSuccessCount">0</div>
+                            <div class="stat-label">Completed</div>
+                        </div>
+                    </div>
+
+                    <!-- FAILED Count Block -->
+                    <div class="download-stat-card failed">
+                        <div class="stat-header">
+                            <span class="stat-icon">❌</span>
+                            <span class="stat-title">FAILED</span>
+                        </div>
+                        <div class="stat-count-container">
+                            <div class="stat-count" id="totalFailedCount">0</div>
+                            <div class="stat-label">Failed</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Individual Download Cards -->
+                <div class="downloads-container" id="downloadsContainer">
+                    <p class="downloads-empty">No active downloads</p>
+                </div>
+            </section>
+
+            <!-- Log Section -->
+            <section class="card log-card" id="logSection" style="display: none;">
+                <div class="card-header" onclick="toggleLogsCollapse()" style="cursor: pointer;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <span id="logsCollapseIcon" style="transition: transform 0.2s;">▼</span>
+                        <h2>📜 Logs</h2>
+                    </div>
+                    <div class="log-controls" onclick="event.stopPropagation();">
+                        <button class="btn-small" onclick="clearLogs()" title="Clear logs">🗑️</button>
+                        <button class="btn-small" onclick="toggleAutoScroll()" title="Toggle auto-scroll">
+                            <span id="autoScrollIcon">📌</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="log-container" id="logContainer"></div>
+            </section>
+        </main>
+
+        <footer>
+            <p>HLS Video Downloader v2.5</p>
+            <p class="footer-note">⚠️ For private, non-commercial use only</p>
+        </footer>
+    </div>
+
+    <!-- Toast Notification Container -->
+    <div id="toastContainer" class="toast-container"></div>
+
+    <!-- Custom Confirmation Modal -->
+    <div id="confirmModal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="confirmModalTitle">Confirmation</h3>
+            </div>
+            <div class="modal-body">
+                <p id="confirmModalMessage"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeConfirmModal(false)">Cancel</button>
+                <button class="btn btn-primary" onclick="closeConfirmModal(true)" id="confirmModalOkBtn">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

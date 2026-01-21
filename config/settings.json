@@ -1,0 +1,18 @@
+{
+    "download_path": "./Downloads",
+    "max_parallel_downloads": 5,
+    "default_format": "mkv",
+    "default_quality": "1080p",
+    "default_wait_time": 45,
+    "auto_retry": true,
+    "max_retry_attempts": 3,
+    "audio_only": false,
+
+    "auto_scraper": {
+        "enabled": true,
+        "idle_threshold_seconds": 30,
+        "scrape_interval_seconds": 25,
+        "batch_size": 4,
+        "min_idle_between_scrapes": 10
+    }
+}
