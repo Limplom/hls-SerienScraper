@@ -209,12 +209,12 @@
                     <div class="options-grid">
                         <div class="option-item">
                             <label for="wait">Wait Time (Seconds)</label>
-                            <input type="number" id="wait" value="60" min="30" max="120" class="form-control-small">
+                            <input type="number" id="wait" value="{{ config.default_wait_time }}" min="30" max="120" class="form-control-small">
                         </div>
 
                         <div class="option-item">
                             <label for="max_concurrent">Max Parallel Downloads</label>
-                            <input type="number" id="max_concurrent" value="3" min="1" max="10" class="form-control-small">
+                            <input type="number" id="max_concurrent" value="{{ config.max_parallel_downloads }}" min="1" max="{{ config.max_parallel_limit }}" class="form-control-small">
                         </div>
 
                         <div class="option-item">
@@ -231,10 +231,6 @@
                         <label class="checkbox-label">
                             <input type="checkbox" id="force">
                             <span>Overwrite</span>
-                        </label>
-                        <label class="checkbox-label" title="Automatically retry on errors (max 3x with increasing wait time)">
-                            <input type="checkbox" id="auto_retry" checked>
-                            <span>Auto-Retry</span>
                         </label>
                     </div>
                 </div>

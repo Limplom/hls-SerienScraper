@@ -452,12 +452,14 @@ async function startDownload() {
     }
 
     // Collect options
-    const maxConcurrent = parseInt(document.getElementById('max_concurrent').value) || 3;
+    const maxConcurrentInput = document.getElementById('max_concurrent');
+    const maxConcurrent = parseInt(maxConcurrentInput.value) || 3;
+    const maxLimit = parseInt(maxConcurrentInput.max) || 20;  // Read max from HTML attribute
     const options = {
         seasons: seasonsString,
         episodes: episodesString,  // Fallback episodes string
         episodes_per_season: episodesPerSeasonData,  // Send per-season selection
-        parallel: Math.min(Math.max(1, maxConcurrent), 10),  // Between 1 and 10
+        parallel: Math.min(Math.max(1, maxConcurrent), maxLimit),  // Between 1 and maxLimit
         wait: parseInt(document.getElementById('wait').value),
         quality: document.getElementById('quality').value,
         format: document.getElementById('format').value,
@@ -466,7 +468,6 @@ async function startDownload() {
         adblock: true,  // Ad-Blocking is always enabled
         english_title: document.getElementById('english_title').checked,
         force: document.getElementById('force').checked,
-        auto_retry: document.getElementById('auto_retry')?.checked ?? true,  // Auto-retry on failure
         audio_only: document.getElementById('audio_only')?.checked ?? false,  // Audio only mode
         audio_format: document.getElementById('audioFormat')?.value || 'mp3',  // Audio format (mp3, flac, etc.)
         audio_bitrate: document.getElementById('audioBitrate')?.value || '0',  // Audio bitrate (0 = best)
@@ -1046,7 +1047,6 @@ function savePreferences(options) {
         codec: options.codec,
         english_title: options.english_title,
         force: options.force,
-        auto_retry: options.auto_retry,
         audio_only: options.audio_only,
         audio_format: options.audio_format,
         audio_bitrate: options.audio_bitrate
@@ -1069,9 +1069,6 @@ function loadPreferences() {
         if (prefs.codec && document.getElementById('codec')) document.getElementById('codec').value = prefs.codec;
         if (prefs.english_title !== undefined) document.getElementById('english_title').checked = prefs.english_title;
         if (prefs.force !== undefined) document.getElementById('force').checked = prefs.force;
-        if (prefs.auto_retry !== undefined && document.getElementById('auto_retry')) {
-            document.getElementById('auto_retry').checked = prefs.auto_retry;
-        }
         // Load audio settings
         if (prefs.audio_format && document.getElementById('audioFormat')) {
             document.getElementById('audioFormat').value = prefs.audio_format;
@@ -1107,9 +1104,10 @@ function initializeMaxConcurrentControl() {
     // Update backend when user changes value
     maxConcurrentInput.addEventListener('change', async function() {
         const newValue = parseInt(this.value);
+        const maxLimit = parseInt(this.max) || 20;  // Read max from HTML attribute
 
-        if (newValue < 1 || newValue > 10) {
-            showToast('Wert muss zwischen 1 und 10 liegen', 'warning');
+        if (newValue < 1 || newValue > maxLimit) {
+            showToast(`Wert muss zwischen 1 und ${maxLimit} liegen`, 'warning');
             return;
         }
 

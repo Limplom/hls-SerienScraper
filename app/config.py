@@ -85,17 +85,7 @@ class Config:
         _json_settings.get('default_wait_time', 60)
     ))
 
-    # Auto retry on failure
-    AUTO_RETRY = os.getenv(
-        'HLS_AUTO_RETRY',
-        str(_json_settings.get('auto_retry', True))
-    ).lower() in ('true', '1', 'yes')
-
-    # Max retry attempts
-    MAX_RETRY_ATTEMPTS = int(os.getenv(
-        'HLS_MAX_RETRIES',
-        _json_settings.get('max_retry_attempts', 3)
-    ))
+    # Note: Auto-retry has been removed. Retries are now manual only via the UI.
 
     # Audio only mode (extract only audio track)
     AUDIO_ONLY = os.getenv(

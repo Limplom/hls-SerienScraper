@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, Future
-from threading import Semaphore, Event, RLock
+from threading import Event, RLock
 from typing import Dict, Optional, Set
 import traceback
 import atexit
@@ -65,8 +65,13 @@ app = Flask(__name__,
 # Security: Use environment variable for secret key, generate random default for development
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', os.urandom(24).hex())
 
-# Security: Restrict CORS to configured origins instead of allowing all
-ALLOWED_ORIGINS = app_config.CORS_ORIGINS.split(',') if hasattr(app_config, 'CORS_ORIGINS') else ['http://localhost:5000']
+# CORS configuration for SocketIO
+# For local development, allow all origins. For production, set CORS_ORIGINS env variable.
+if os.getenv('CORS_ORIGINS'):
+    ALLOWED_ORIGINS = os.getenv('CORS_ORIGINS').split(',')
+else:
+    # Local development - allow all origins
+    ALLOWED_ORIGINS = "*"
 socketio = SocketIO(app, cors_allowed_origins=ALLOWED_ORIGINS, async_mode='threading')
 
 # Thread-safe wrapper for active_downloads dict
@@ -137,6 +142,93 @@ download_queue = queue.Queue()
 queue_manager = DownloadQueueManager()
 
 # ==========================================
+# GLOBAL EPISODE SEMAPHORE
+# ==========================================
+# This semaphore limits the TOTAL number of concurrent episode downloads
+# across ALL series. When max_parallel=5, only 5 episodes can download
+# at once, regardless of how many series are in the queue.
+
+class GlobalEpisodeSemaphore:
+    """
+    Thread-safe global semaphore for limiting concurrent episode downloads.
+    Uses threading.Semaphore since downloads run in separate threads.
+    """
+    def __init__(self, max_concurrent: int):
+        self._max = max_concurrent
+        self._semaphore = threading.Semaphore(max_concurrent)
+        self._lock = threading.Lock()
+        self._active_count = 0
+
+    @property
+    def max_concurrent(self) -> int:
+        with self._lock:
+            return self._max
+
+    @property
+    def active_count(self) -> int:
+        with self._lock:
+            return self._active_count
+
+    @property
+    def available_slots(self) -> int:
+        with self._lock:
+            return self._max - self._active_count
+
+    def update_max(self, new_max: int):
+        """
+        Update the maximum concurrent downloads.
+        This adjusts the semaphore by releasing or acquiring slots.
+        """
+        with self._lock:
+            diff = new_max - self._max
+            self._max = new_max
+
+            if diff > 0:
+                # Increase: release additional slots
+                for _ in range(diff):
+                    self._semaphore.release()
+                print(f"🔓 Global semaphore increased to {new_max} slots (+{diff})")
+            elif diff < 0:
+                # Decrease: try to acquire slots (non-blocking)
+                # This won't immediately reduce active downloads but will
+                # prevent new ones from starting until count drops
+                acquired = 0
+                for _ in range(-diff):
+                    if self._semaphore.acquire(blocking=False):
+                        acquired += 1
+                if acquired > 0:
+                    print(f"🔒 Global semaphore decreased to {new_max} slots (-{acquired} acquired)")
+                else:
+                    print(f"🔒 Global semaphore target set to {new_max} (will take effect as downloads complete)")
+
+    def acquire(self, timeout: float = None) -> bool:
+        """Acquire a download slot. Returns True if acquired, False on timeout."""
+        result = self._semaphore.acquire(blocking=True, timeout=timeout)
+        if result:
+            with self._lock:
+                self._active_count += 1
+        return result
+
+    def release(self):
+        """Release a download slot."""
+        with self._lock:
+            if self._active_count > 0:
+                self._active_count -= 1
+        self._semaphore.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.release()
+        return False
+
+
+# Initialize global episode semaphore with configured max parallel downloads
+global_episode_semaphore = GlobalEpisodeSemaphore(app_config.MAX_PARALLEL_DOWNLOADS)
+
+# ==========================================
 # ROBUST QUEUE PROCESSOR CLASS
 # ==========================================
 
@@ -205,9 +297,11 @@ class RobustQueueProcessor:
             # Reset shutdown event
             self._shutdown_event.clear()
 
-            # Create new executor
+            # Create new executor with max limit capacity (not current setting)
+            # This allows dynamic increases without recreating the executor
+            max_limit = app_config.MAX_PARALLEL_LIMIT
             self._executor = ThreadPoolExecutor(
-                max_workers=self.max_parallel + 2,  # Extra workers for overhead
+                max_workers=max_limit + 2,  # Use max limit + overhead
                 thread_name_prefix="DownloadWorker"
             )
 
@@ -270,30 +364,41 @@ class RobustQueueProcessor:
                     active_downloads.cleanup_old_entries(max_age_hours=1)
                     last_health_check = current_time
 
-                # Check if we can start more downloads
-                with self._lock:
-                    current_active = len(self._active_sessions)
-                    max_allowed = self.max_parallel
+                # Start as many series as possible
+                # Note: max_parallel now controls EPISODE parallelism via global_episode_semaphore
+                # Series-level limit is separate: allow many series to be active, but their
+                # episodes will compete for global semaphore slots
+                MAX_ACTIVE_SERIES = app_config.MAX_PARALLEL_LIMIT + 5  # Allow more series than episode slots
+                downloads_started = 0
+                while not self._shutdown_event.is_set():
+                    # Check if we can start more series
+                    with self._lock:
+                        current_active = len(self._active_sessions)
 
-                if current_active >= max_allowed:
-                    # At capacity, wait for wakeup (limit change) or timeout
-                    # Use wait on both events - shutdown or wakeup
+                    if current_active >= MAX_ACTIVE_SERIES:
+                        # At series capacity, stop starting new series
+                        break
+
+                    # Get next queued item
+                    item = queue_manager.get_next_queued()
+
+                    if not item:
+                        # No more items in queue
+                        break
+
+                    # Start download (series will compete for global episode slots)
+                    self._start_download(item)
+                    downloads_started += 1
+
+                    # Tiny delay between starts to prevent race conditions
+                    time.sleep(0.05)
+
+                # If we started downloads, no need to wait long
+                if downloads_started > 0:
+                    time.sleep(0.1)
+                else:
+                    # Nothing to do, wait for wakeup or timeout
                     self._wait_for_event(timeout=2.0)
-                    continue
-
-                # Get next queued item
-                item = queue_manager.get_next_queued()
-
-                if not item:
-                    # No items, wait for wakeup or timeout
-                    self._wait_for_event(timeout=3.0)
-                    continue
-
-                # Start download
-                self._start_download(item)
-
-                # Small delay to prevent CPU spinning
-                time.sleep(0.3)
 
             except Exception as e:
                 print(f"❌ Queue processor error: {e}")
@@ -335,7 +440,7 @@ class RobustQueueProcessor:
         try:
             print(f"🎬 Starting: {item.series_name} (Session: {session_id[:8]}...)")
             print(f"   URL: {item.url}")
-            print(f"   Active: {len(self._active_sessions)}/{self.max_parallel}")
+            print(f"   Active series: {len(self._active_sessions)} | Global episode slots: {global_episode_semaphore.active_count}/{global_episode_semaphore.max_concurrent}")
 
             # Mark as processing
             queue_manager.update_status(
@@ -484,16 +589,22 @@ class RobustQueueProcessor:
                 self._last_activity[session_id] = datetime.now()
 
     def set_max_parallel(self, max_parallel: int):
-        """Update maximum parallel downloads and wake up processor to start new downloads."""
-        old_max = self.max_parallel
+        """Update maximum parallel episode downloads via global semaphore."""
         # Use configurable limit from Config
         max_limit = app_config.MAX_PARALLEL_LIMIT
+        new_max = max(1, min(max_limit, max_parallel))
+
+        # Update the GLOBAL episode semaphore (this is what actually limits downloads)
+        old_max = global_episode_semaphore.max_concurrent
+        global_episode_semaphore.update_max(new_max)
+
+        # Also update local reference (for stats/display purposes)
         with self._lock:
-            self.max_parallel = max(1, min(max_limit, max_parallel))
-            print(f"📊 Max parallel downloads set to: {self.max_parallel} (limit: {max_limit})")
+            self.max_parallel = new_max
+            print(f"📊 Max parallel episode downloads set to: {new_max} (limit: {max_limit})")
 
         # If limit was increased, wake up processor to start more downloads immediately
-        if max_parallel > old_max:
+        if new_max > old_max:
             print(f"⚡ Limit increased, waking up processor to start more downloads...")
             self.wakeup()
 
@@ -1191,16 +1302,13 @@ class BackgroundAutoScraper:
 # Initialize the background auto-scraper
 auto_scraper = BackgroundAutoScraper(queue_processor)
 
-# Legacy compatibility variables (for gradual migration)
+# Legacy compatibility variables (kept for backward compatibility)
 queue_processor_running = False  # Deprecated, use queue_processor.is_running
 queue_processor_lock = threading.Lock()
+MAX_PARALLEL_DOWNLOADS = app_config.MAX_PARALLEL_DOWNLOADS  # Legacy reference
 
-# Parallel download configuration - use values from Config
-MAX_PARALLEL_DOWNLOADS = app_config.MAX_PARALLEL_DOWNLOADS
-download_semaphore = Semaphore(app_config.MAX_PARALLEL_LIMIT)  # Use max limit for semaphore
-executor = ThreadPoolExecutor(max_workers=app_config.MAX_PARALLEL_LIMIT + 2, thread_name_prefix="DownloadWorker")
-active_download_count = 0
-active_download_count_lock = threading.Lock()
+# Note: Global episode semaphore is defined earlier (GlobalEpisodeSemaphore class)
+# It controls the total number of concurrent episode downloads across ALL series
 
 # Aggregated progress tracker for parallel downloads
 # Structure: {session_id: {episode_key: percent, ...}}
@@ -1631,8 +1739,10 @@ async def process_single_episode(extractor, url, args, browser_id="", logger=Non
         return True
 
 
-async def process_episode_with_semaphore(semaphore, ep_num, base_url, season, args, episode_idx, total_episodes, browser_num, logger=None, on_complete=None, cancel_check=None):
-    """Verarbeitet eine Episode mit Semaphore (für Parallelisierung) - WebUI version
+async def process_episode_with_semaphore(ep_num, base_url, season, args, episode_idx, total_episodes, browser_num, logger=None, on_complete=None, cancel_check=None):
+    """Verarbeitet eine Episode mit globalem Semaphore (für Parallelisierung) - WebUI version
+
+    Uses the global_episode_semaphore to limit total concurrent downloads across ALL series.
 
     Args:
         cancel_check: Optional callable that returns True if download should be cancelled
@@ -1640,21 +1750,40 @@ async def process_episode_with_semaphore(semaphore, ep_num, base_url, season, ar
     browser_id = f"[B{browser_num}]"
     episode_key = f"S{season:02d}E{ep_num:02d}"
 
-    # Log when waiting for semaphore
-    print(f"⏳ {episode_key} waiting for semaphore slot...")
+    # Check if cancelled before even waiting for slot
+    if cancel_check and cancel_check():
+        if logger:
+            logger.log(f"{browser_id} ⏹️ {episode_key} skipped (cancelled before queue)", "warning")
+        return None
 
-    async with semaphore:
-        print(f"🔓 {episode_key} acquired semaphore slot, starting download...")
-        # Check if cancelled before starting
+    # Log when waiting for global semaphore
+    available = global_episode_semaphore.available_slots
+    active = global_episode_semaphore.active_count
+    print(f"⏳ {episode_key} waiting for global slot... (active: {active}/{global_episode_semaphore.max_concurrent})")
+
+    # Acquire global semaphore slot (blocking in thread context)
+    # Use run_in_executor to avoid blocking the event loop
+    loop = asyncio.get_event_loop()
+    acquired = await loop.run_in_executor(None, lambda: global_episode_semaphore.acquire(timeout=3600))
+
+    if not acquired:
+        if logger:
+            logger.log(f"{browser_id} ⏹️ {episode_key} timeout waiting for slot", "error")
+        return False
+
+    try:
+        print(f"🔓 {episode_key} acquired global slot, starting download... (active: {global_episode_semaphore.active_count}/{global_episode_semaphore.max_concurrent})")
+
+        # Check if cancelled after acquiring slot
         if cancel_check and cancel_check():
             if logger:
-                logger.log(f"{browser_id} ⏹️ S{season:02d}E{ep_num:02d} skipped (cancelled)", "warning")
-            return None  # Return None to indicate cancellation (not failure)
+                logger.log(f"{browser_id} ⏹️ {episode_key} skipped (cancelled)", "warning")
+            return None
 
         url = f"{base_url}/staffel-{season}/episode-{ep_num}"
 
         if logger:
-            logger.log(f"{browser_id} Starting S{season:02d}E{ep_num:02d} ({episode_idx}/{total_episodes})", "info")
+            logger.log(f"{browser_id} Starting {episode_key} ({episode_idx}/{total_episodes})", "info")
 
         try:
             extractor = HLSExtractor()
@@ -1663,35 +1792,36 @@ async def process_episode_with_semaphore(semaphore, ep_num, base_url, season, ar
             # Check again after processing (in case cancelled during download)
             if cancel_check and cancel_check():
                 if logger:
-                    logger.log(f"{browser_id} ⏹️ S{season:02d}E{ep_num:02d} cancelled after processing", "warning")
+                    logger.log(f"{browser_id} ⏹️ {episode_key} cancelled after processing", "warning")
                 return None
 
             if result:
                 if logger:
-                    logger.log(f"{browser_id} ✅ S{season:02d}E{ep_num:02d} SUCCESS ({episode_idx}/{total_episodes})", "success")
+                    logger.log(f"{browser_id} ✅ {episode_key} SUCCESS ({episode_idx}/{total_episodes})", "success")
             else:
                 if logger:
-                    logger.log(f"{browser_id} ❌ S{season:02d}E{ep_num:02d} FAILED ({episode_idx}/{total_episodes})", "error")
+                    logger.log(f"{browser_id} ❌ {episode_key} FAILED ({episode_idx}/{total_episodes})", "error")
 
             # Call completion callback if provided (for live progress updates)
             if on_complete:
                 on_complete(ep_num, season, result)
 
-            print(f"🔒 {episode_key} releasing semaphore slot")
             return result
         except asyncio.CancelledError:
             if logger:
-                logger.log(f"{browser_id} ⏹️ S{season:02d}E{ep_num:02d} cancelled", "warning")
-            print(f"🔒 {episode_key} releasing semaphore slot (cancelled)")
+                logger.log(f"{browser_id} ⏹️ {episode_key} cancelled", "warning")
             return None
         except Exception as e:
             if logger:
-                logger.log(f"{browser_id} ❌ S{season:02d}E{ep_num:02d} ERROR: {e}", "error")
+                logger.log(f"{browser_id} ❌ {episode_key} ERROR: {e}", "error")
             # Call completion callback for errors too
             if on_complete:
                 on_complete(ep_num, season, False)
-            print(f"🔒 {episode_key} releasing semaphore slot (error)")
             return False
+    finally:
+        # Always release the global semaphore slot
+        global_episode_semaphore.release()
+        print(f"🔒 {episode_key} released global slot (active: {global_episode_semaphore.active_count}/{global_episode_semaphore.max_concurrent})")
 
 
 async def process_download_async(session_id, url, options):
@@ -1699,8 +1829,18 @@ async def process_download_async(session_id, url, options):
     try:
         logger = WebLogger(session_id)
 
-        # Update status
-        active_downloads[session_id]['status'] = 'processing'
+        # Ensure session exists in active_downloads (for retries or late starts)
+        if session_id not in active_downloads:
+            active_downloads[session_id] = {
+                'url': url,
+                'status': 'processing',
+                'current': 0,
+                'total': 0,
+                'options': options
+            }
+        else:
+            # Update status
+            active_downloads[session_id]['status'] = 'processing'
         socketio.emit('status', {
             'session_id': session_id,
             'status': 'processing',
@@ -1933,11 +2073,8 @@ async def process_download_async(session_id, url, options):
             parallel = args.parallel
 
             if parallel > 1 and len(episodes) > 1:
-                # PARALLEL MODE
-                logger.log(f"🚀 Starting parallel processing with {parallel} browsers...", "info")
-
-                # Semaphore to limit concurrent browsers
-                semaphore = asyncio.Semaphore(parallel)
+                # PARALLEL MODE - uses global_episode_semaphore for cross-series limits
+                logger.log(f"🚀 Starting parallel processing (global limit: {global_episode_semaphore.max_concurrent})...", "info")
 
                 # Custom print function for filtering verbose logs - only show end-user relevant info
                 original_print = print
@@ -2000,55 +2137,11 @@ async def process_download_async(session_id, url, options):
                                 # Reset retry count on success
                                 queue_manager.reset_retry_count(session_id, episode_key)
                             else:
-                                # Check if we should auto-retry
-                                should_retry, retry_delay, attempt_num = queue_manager.should_auto_retry(
-                                    session_id, episode_key
-                                )
-
-                                if should_retry:
-                                    # Schedule auto-retry with exponential backoff
-                                    queue_manager.increment_retry_count(session_id, episode_key)
-                                    logger.log(
-                                        f"🔄 Auto-retry {episode_key} in {retry_delay}s (Versuch {attempt_num}/3)",
-                                        "warning"
-                                    )
-
-                                    # Schedule the retry as a background task
-                                    async def retry_episode():
-                                        await asyncio.sleep(retry_delay)
-                                        # Check if download was cancelled
-                                        if active_downloads.get(session_id, {}).get('status') == 'cancelled':
-                                            return
-
-                                        retry_logger = WebLogger(session_id, episode_key=f"{episode_key}_retry{attempt_num}")
-                                        retry_logger.log(f"🔄 Retrying {episode_key} (Versuch {attempt_num}/3)", "info")
-
-                                        try:
-                                            retry_result = await process_episode_with_semaphore(
-                                                semaphore,
-                                                ep_num,
-                                                base_url,
-                                                ep_season,
-                                                args,
-                                                0,  # episode_idx
-                                                1,  # total
-                                                1,  # browser_num
-                                                retry_logger,
-                                                on_complete=on_episode_complete,
-                                                cancel_check=is_cancelled
-                                            )
-                                        except Exception as e:
-                                            retry_logger.log(f"❌ Retry failed: {str(e)}", "error")
-
-                                    # Run retry in background without blocking
-                                    asyncio.create_task(retry_episode())
-                                else:
-                                    # No more retries - mark as failed
-                                    live_failed[0] += 1
-                                    total_failed += 1
-                                    all_failed_episodes.append(episode_key)
-                                    if attempt_num > 0:
-                                        logger.log(f"❌ {episode_key} failed after {attempt_num} retries", "error")
+                                # Episode failed - add to failed list (no auto-retry, manual retry only)
+                                live_failed[0] += 1
+                                total_failed += 1
+                                all_failed_episodes.append(episode_key)
+                                logger.log(f"❌ {episode_key} failed - use manual retry if needed", "error")
 
                             # Clear this episode from the progress tracker (it's done)
                             clear_progress_tracker(session_id, episode_key)
@@ -2077,14 +2170,15 @@ async def process_download_async(session_id, url, options):
                         return active_downloads.get(session_id, {}).get('status') == 'cancelled'
 
                     # Create tasks for all episodes with callback and episode-specific loggers
+                    # Uses global_episode_semaphore internally (no local semaphore needed)
                     tasks = []
+                    max_concurrent = global_episode_semaphore.max_concurrent
                     for i, ep_num in enumerate(episodes, 1):
-                        browser_num = ((i - 1) % parallel) + 1
+                        browser_num = ((i - 1) % max_concurrent) + 1
                         # Create episode-specific logger for progress tracking
                         episode_key = f"S{season:02d}E{ep_num:02d}"
                         episode_logger = WebLogger(session_id, episode_key=episode_key)
                         task = process_episode_with_semaphore(
-                            semaphore,
                             ep_num,
                             base_url,
                             season,
@@ -2471,8 +2565,9 @@ async def process_download_async(session_id, url, options):
         # End of extras loop
 
         # Final status for all seasons and extras
-        if active_downloads[session_id]['status'] != 'cancelled':
+        if session_id in active_downloads and active_downloads[session_id]['status'] != 'cancelled':
             active_downloads[session_id]['status'] = 'completed'
+            active_downloads[session_id]['completed_at'] = datetime.now()  # For memory cleanup
 
             # Build message with season and extras summary
             content_count = len(seasons_to_download) + len(extras_to_download)
@@ -2532,7 +2627,15 @@ def run_download_thread(session_id, url, options):
 @app.route('/')
 def index():
     """Main page"""
-    return render_template('index.html')
+    # Pass config values to template for dynamic limits
+    config_values = {
+        'max_parallel_limit': app_config.MAX_PARALLEL_LIMIT,
+        'max_parallel_downloads': app_config.MAX_PARALLEL_DOWNLOADS,
+        'default_format': app_config.DEFAULT_FORMAT,
+        'default_quality': app_config.DEFAULT_QUALITY,
+        'default_wait_time': app_config.DEFAULT_WAIT_TIME
+    }
+    return render_template('index.html', config=config_values)
 
 
 @app.route('/api/start', methods=['POST'])
@@ -3616,13 +3719,13 @@ def manage_max_concurrent():
     max_limit = queue_processor.get_max_limit()
 
     if request.method == 'GET':
-        # Use robust processor stats
-        processor_stats = queue_processor.stats
+        # Use global episode semaphore for accurate info
         return jsonify({
-            'max_concurrent': processor_stats['max_parallel'],
-            'currently_active': processor_stats['active_downloads'],
-            'available_slots': processor_stats['max_parallel'] - processor_stats['active_downloads'],
-            'max_limit': max_limit  # Include the absolute maximum allowed
+            'max_concurrent': global_episode_semaphore.max_concurrent,
+            'currently_active': global_episode_semaphore.active_count,
+            'available_slots': global_episode_semaphore.available_slots,
+            'max_limit': max_limit,
+            'active_series': queue_processor.active_count  # Number of series being processed
         })
 
     # POST - Update max concurrent downloads
@@ -3661,8 +3764,10 @@ def manage_processor():
         stats = queue_processor.stats
         return jsonify({
             'status': 'running' if stats['is_running'] else 'stopped',
-            'active_downloads': stats['active_downloads'],
-            'max_parallel': stats['max_parallel'],
+            'active_series': stats['active_downloads'],  # Number of series being processed
+            'active_episodes': global_episode_semaphore.active_count,  # Actual concurrent episode downloads
+            'max_parallel_episodes': global_episode_semaphore.max_concurrent,
+            'available_episode_slots': global_episode_semaphore.available_slots,
             'statistics': {
                 'total_processed': stats['total_processed'],
                 'total_completed': stats['total_completed'],

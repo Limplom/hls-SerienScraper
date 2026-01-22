@@ -5,3 +5,4 @@ download_queue.json
 /app/__pycache__
 /filter_cache
 /.claude
+/Downloads
