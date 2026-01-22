@@ -4,3 +4,4 @@ download_queue.json
 /venv
 /app/__pycache__
 /filter_cache
+/.claude
