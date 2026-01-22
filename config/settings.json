@@ -1,6 +1,7 @@
 {
     "download_path": "./Downloads",
-    "max_parallel_downloads": 5,
+    "max_parallel_limit": 10,
+    "max_parallel_downloads": 10,
     "default_format": "mkv",
     "default_quality": "1080p",
     "default_wait_time": 45,

@@ -40,18 +40,24 @@ def main():
     # Import and run the web GUI
     from app.web_gui import app, socketio
 
+    # Configurable server settings via environment variables
+    DEBUG = os.getenv('FLASK_DEBUG', 'false').lower() == 'true'
+    HOST = os.getenv('FLASK_HOST', '127.0.0.1')
+    PORT = int(os.getenv('FLASK_PORT', 5000))
+
     print("=" * 60)
     print("🌐 Starting Web Server")
     print("=" * 60)
     print()
-    print("📍 Server URL: http://localhost:5000")
+    print(f"📍 Server URL: http://{HOST}:{PORT}")
     print("📁 Downloads folder: ./Downloads/")
+    print(f"🔧 Debug mode: {DEBUG}")
     print()
     print("Press Ctrl+C to stop the server")
     print("=" * 60)
     print()
 
-    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
+    socketio.run(app, debug=DEBUG, host=HOST, port=PORT)
 
 if __name__ == '__main__':
     main()

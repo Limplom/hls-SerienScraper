@@ -1,0 +1,6 @@
+/__pycache__
+/series_cache
+download_queue.json
+/venv
+/app/__pycache__
+/filter_cache

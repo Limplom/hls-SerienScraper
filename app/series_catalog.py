@@ -1,13 +1,12 @@
 """
 Series Catalog Module
-Handles scraping and caching of catalogs from multiple sources:
-- http://186.2.175.5/serien (Series)
-- https://aniworld.to/animes (Anime)
+Handles scraping and caching of catalogs from multiple sources.
 
 Optimized with parallel scraping for faster catalog updates.
 """
 
 import json
+import os
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
@@ -15,27 +14,36 @@ from playwright.async_api import async_playwright
 import re
 import asyncio
 
+from app.config import Config
+
+# Cache files
 CATALOG_CACHE_FILE = Path("./series_cache/catalog_index.json")
 ANIME_CACHE_FILE = Path("./series_cache/anime_catalog_index.json")
 CATALOG_MAX_AGE_HOURS = 24
 
-# Source definitions
-SOURCES = {
-    'series': {
-        'base_url': 'http://186.2.175.5',
-        'catalog_path': '/serien',
-        'content_path': '/serie/stream/',
-        'name': 'Serien',
-        'cache_file': CATALOG_CACHE_FILE
-    },
-    'anime': {
-        'base_url': 'https://aniworld.to',
-        'catalog_path': '/animes',
-        'content_path': '/anime/stream/',
-        'name': 'Anime',
-        'cache_file': ANIME_CACHE_FILE
+
+def _get_sources() -> Dict:
+    """Get source definitions with configurable URLs."""
+    return {
+        'series': {
+            'base_url': Config.SERIEN_BASE_URL,
+            'catalog_path': '/serien',
+            'content_path': '/serie/stream/',
+            'name': 'Serien',
+            'cache_file': CATALOG_CACHE_FILE
+        },
+        'anime': {
+            'base_url': Config.ANIME_BASE_URL,
+            'catalog_path': '/animes',
+            'content_path': '/anime/stream/',
+            'name': 'Anime',
+            'cache_file': ANIME_CACHE_FILE
+        }
     }
-}
+
+
+# For backwards compatibility
+SOURCES = _get_sources()
 
 
 async def scrape_catalog(source='series', max_workers=3) -> Dict:

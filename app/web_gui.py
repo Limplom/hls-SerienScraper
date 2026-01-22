@@ -61,11 +61,76 @@ app_config = Config()
 app = Flask(__name__,
             template_folder=str(project_root / 'templates'),
             static_folder=str(project_root / 'static'))
-app.config['SECRET_KEY'] = 'hls-downloader-secret-key-2024'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# Global state
-active_downloads = {}
+# Security: Use environment variable for secret key, generate random default for development
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', os.urandom(24).hex())
+
+# Security: Restrict CORS to configured origins instead of allowing all
+ALLOWED_ORIGINS = app_config.CORS_ORIGINS.split(',') if hasattr(app_config, 'CORS_ORIGINS') else ['http://localhost:5000']
+socketio = SocketIO(app, cors_allowed_origins=ALLOWED_ORIGINS, async_mode='threading')
+
+# Thread-safe wrapper for active_downloads dict
+class ThreadSafeDict:
+    """Thread-safe dictionary wrapper that automatically handles locking."""
+
+    def __init__(self):
+        self._data = {}
+        self._lock = threading.RLock()  # RLock allows nested access from same thread
+
+    def __getitem__(self, key):
+        with self._lock:
+            return self._data[key]
+
+    def __setitem__(self, key, value):
+        with self._lock:
+            self._data[key] = value
+
+    def __delitem__(self, key):
+        with self._lock:
+            del self._data[key]
+
+    def __contains__(self, key):
+        with self._lock:
+            return key in self._data
+
+    def get(self, key, default=None):
+        with self._lock:
+            return self._data.get(key, default)
+
+    def items(self):
+        with self._lock:
+            return list(self._data.items())
+
+    def keys(self):
+        with self._lock:
+            return list(self._data.keys())
+
+    def values(self):
+        with self._lock:
+            return list(self._data.values())
+
+    def __len__(self):
+        with self._lock:
+            return len(self._data)
+
+    def cleanup_old_entries(self, max_age_hours: int = 1):
+        """Remove completed/failed/cancelled downloads older than max_age_hours."""
+        cutoff = datetime.now() - timedelta(hours=max_age_hours)
+        with self._lock:
+            to_remove = [
+                sid for sid, data in self._data.items()
+                if data.get('status') in ('completed', 'failed', 'cancelled')
+                and data.get('completed_at', datetime.now()) < cutoff
+            ]
+            for sid in to_remove:
+                del self._data[sid]
+            if to_remove:
+                print(f"🧹 Cleaned up {len(to_remove)} old download entries")
+            return len(to_remove)
+
+
+# Global state with thread-safety
+active_downloads = ThreadSafeDict()
 download_queue = queue.Queue()
 
 # Initialize queue manager
@@ -198,10 +263,11 @@ class RobustQueueProcessor:
                 # Clear wakeup event at start of each iteration
                 self._wakeup_event.clear()
 
-                # Health check for stuck downloads
+                # Health check for stuck downloads and memory cleanup
                 current_time = time.time()
                 if current_time - last_health_check > self._health_check_interval:
                     self._check_stuck_downloads()
+                    active_downloads.cleanup_old_entries(max_age_hours=1)
                     last_health_check = current_time
 
                 # Check if we can start more downloads
@@ -371,6 +437,9 @@ class RobustQueueProcessor:
                 completed_at=datetime.now().isoformat()
             )
 
+        # Wake up processor immediately to start next download
+        self.wakeup()
+
     def _check_stuck_downloads(self):
         """Check for downloads that appear to be stuck."""
         now = datetime.now()
@@ -417,18 +486,24 @@ class RobustQueueProcessor:
     def set_max_parallel(self, max_parallel: int):
         """Update maximum parallel downloads and wake up processor to start new downloads."""
         old_max = self.max_parallel
+        # Use configurable limit from Config
+        max_limit = app_config.MAX_PARALLEL_LIMIT
         with self._lock:
-            self.max_parallel = max(1, min(10, max_parallel))
-            print(f"📊 Max parallel downloads set to: {self.max_parallel}")
+            self.max_parallel = max(1, min(max_limit, max_parallel))
+            print(f"📊 Max parallel downloads set to: {self.max_parallel} (limit: {max_limit})")
 
         # If limit was increased, wake up processor to start more downloads immediately
         if max_parallel > old_max:
             print(f"⚡ Limit increased, waking up processor to start more downloads...")
             self.wakeup()
 
+    def get_max_limit(self) -> int:
+        """Get the absolute maximum parallel downloads allowed."""
+        return app_config.MAX_PARALLEL_LIMIT
 
-# Initialize the robust queue processor
-queue_processor = RobustQueueProcessor(max_parallel=3)
+
+# Initialize the robust queue processor with config value
+queue_processor = RobustQueueProcessor(max_parallel=app_config.MAX_PARALLEL_DOWNLOADS)
 
 
 # ==========================================
@@ -1120,10 +1195,10 @@ auto_scraper = BackgroundAutoScraper(queue_processor)
 queue_processor_running = False  # Deprecated, use queue_processor.is_running
 queue_processor_lock = threading.Lock()
 
-# Parallel download configuration
-MAX_PARALLEL_DOWNLOADS = 3  # Default max parallel downloads
-download_semaphore = Semaphore(MAX_PARALLEL_DOWNLOADS)
-executor = ThreadPoolExecutor(max_workers=MAX_PARALLEL_DOWNLOADS + 2, thread_name_prefix="DownloadWorker")
+# Parallel download configuration - use values from Config
+MAX_PARALLEL_DOWNLOADS = app_config.MAX_PARALLEL_DOWNLOADS
+download_semaphore = Semaphore(app_config.MAX_PARALLEL_LIMIT)  # Use max limit for semaphore
+executor = ThreadPoolExecutor(max_workers=app_config.MAX_PARALLEL_LIMIT + 2, thread_name_prefix="DownloadWorker")
 active_download_count = 0
 active_download_count_lock = threading.Lock()
 
@@ -3537,21 +3612,25 @@ def manage_max_concurrent():
     """Get or set max concurrent downloads"""
     global MAX_PARALLEL_DOWNLOADS
 
+    # Get the configurable limit
+    max_limit = queue_processor.get_max_limit()
+
     if request.method == 'GET':
         # Use robust processor stats
         processor_stats = queue_processor.stats
         return jsonify({
             'max_concurrent': processor_stats['max_parallel'],
             'currently_active': processor_stats['active_downloads'],
-            'available_slots': processor_stats['max_parallel'] - processor_stats['active_downloads']
+            'available_slots': processor_stats['max_parallel'] - processor_stats['active_downloads'],
+            'max_limit': max_limit  # Include the absolute maximum allowed
         })
 
     # POST - Update max concurrent downloads
     data = request.json
     new_max = data.get('max_concurrent')
 
-    if not new_max or not isinstance(new_max, int) or new_max < 1 or new_max > 10:
-        return jsonify({'error': 'max_concurrent must be an integer between 1 and 10'}), 400
+    if not new_max or not isinstance(new_max, int) or new_max < 1 or new_max > max_limit:
+        return jsonify({'error': f'max_concurrent must be an integer between 1 and {max_limit}'}), 400
 
     old_max = queue_processor.max_parallel
     MAX_PARALLEL_DOWNLOADS = new_max
@@ -3559,12 +3638,13 @@ def manage_max_concurrent():
     # Update the robust processor
     queue_processor.set_max_parallel(new_max)
 
-    print(f"⚙️ Max concurrent downloads changed: {old_max} → {new_max}")
+    print(f"⚙️ Max concurrent downloads changed: {old_max} → {new_max} (limit: {max_limit})")
 
     return jsonify({
         'message': f'Max concurrent downloads updated to {new_max}',
         'old_value': old_max,
-        'new_value': new_max
+        'new_value': new_max,
+        'max_limit': max_limit
     })
 
 

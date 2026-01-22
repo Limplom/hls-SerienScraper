@@ -5,13 +5,19 @@ Caches scraped series data to avoid redundant scraping operations
 
 import json
 import os
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+logger = logging.getLogger(__name__)
+
 # Cache configuration
 CACHE_DIR = Path("./series_cache")
 CACHE_EXPIRY_DAYS = 7
+
+# Ensure cache directory exists on module load
+CACHE_DIR.mkdir(exist_ok=True)
 
 
 def get_cache_path(series_slug: str) -> Path:
@@ -91,9 +97,6 @@ def save_to_cache(series_slug: str, data: Dict[str, Any]) -> bool:
         True if saved successfully, False otherwise
     """
     try:
-        # Create cache directory if it doesn't exist
-        CACHE_DIR.mkdir(exist_ok=True)
-
         # Build cache entry with metadata
         cache_data = {
             "series_slug": series_slug,

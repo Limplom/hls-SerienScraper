@@ -7,7 +7,7 @@ HLS Video Downloader - FINAL FIXED VERSION
 """
 
 import asyncio
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Page, BrowserContext
 import subprocess
 import sys
 import argparse
@@ -16,6 +16,11 @@ from pathlib import Path
 import urllib.request
 from urllib.parse import urlparse
 import time
+import logging
+from typing import Optional, List, Dict, Any, Tuple, Set
+
+# Setup logging
+logger = logging.getLogger(__name__)
 
 class VideoMetadata:
     def __init__(self):
@@ -105,7 +110,8 @@ class HLSExtractor:
                                 domain = line.split('://')[1].split('/')[0].split('$')[0]
                                 if domain and '.' in domain:
                                     self.ad_filters.add(domain.lower())
-                            except:
+                            except (IndexError, ValueError):
+                                # Malformed filter line, skip silently
                                 pass
             except Exception as e:
                 print(f"⚠ Error parsing {name}: {e}")
@@ -113,7 +119,7 @@ class HLSExtractor:
         print(f"✓ Loaded {len(self.ad_filters)} filter rules")
         return len(self.ad_filters) > 0
     
-    async def close_new_tabs(self, context, main_page):
+    async def close_new_tabs(self, context: BrowserContext, main_page: Page) -> int:
         """Schließt alle neuen Tabs (Werbung) außer der Hauptseite"""
         try:
             pages = context.pages
@@ -123,12 +129,13 @@ class HLSExtractor:
                     try:
                         await page.close()
                         closed += 1
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Could not close ad tab: {e}")
             if closed > 0:
-                print(f"  🗑️  Closed {closed} ad tab(s)")
+                logger.info(f"Closed {closed} ad tab(s)")
             return closed
-        except:
+        except Exception as e:
+            logger.debug(f"Error in close_new_tabs: {e}")
             return 0
     
     async def click_18_plus_popups(self, page, context, phase="initial"):
@@ -192,18 +199,18 @@ class HLSExtractor:
                                                     
                                                     # Schließe neue Tabs die durch Click entstanden
                                                     await self.close_new_tabs(context, page)
-                                                except:
-                                                    pass
+                                                except Exception as e:
+                                                    logger.debug(f"Click failed: {e}")
                                     except Exception as e:
-                                        pass
+                                        logger.debug(f"Button interaction error: {e}")
                         except Exception as e:
-                            pass
-                
+                            logger.debug(f"Frame interaction error: {e}")
+
                 if not found_button and attempt > 3:
                     break
-                    
+
             except Exception as e:
-                pass
+                logger.debug(f"Popup check attempt error: {e}")
         
         if clicked_count > 0:
             print(f"✓ Closed {clicked_count} popup(s) in {phase} phase")
@@ -225,8 +232,8 @@ class HLSExtractor:
         try:
             await page.evaluate("window.scrollBy(0, 200)")
             await asyncio.sleep(1)
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"Scroll failed: {e}")
         
         # Finde den richtigen iframe (der mit dem Video)
         video_frame = None
@@ -241,10 +248,11 @@ class HLSExtractor:
             try:
                 video = await frame.query_selector('video')
                 if video:
-                    print(f"  ✓ Found video iframe: {frame.url[:80]}")
+                    logger.info(f"Found video iframe: {frame.url[:80]}")
                     video_frame = frame
                     break
-            except:
+            except Exception as e:
+                logger.debug(f"Frame query error: {e}")
                 continue
         
         if not video_frame:
@@ -308,13 +316,14 @@ class HLSExtractor:
                                         print(f"    Click #{click_num} failed: {e}")
                                         continue
                                 
-                                print(f"  ✓ Clicked play button {click_num} times!")
+                                logger.info(f"Clicked play button {click_num} times!")
                                 found_and_clicked = True
-                                
+
                                 # Extra Pause nach allen Clicks
                                 await asyncio.sleep(3)
                                 return True
-                    except:
+                    except Exception as e:
+                        logger.debug(f"Play button search for '{text}' failed: {e}")
                         continue
                 
                 if not found_and_clicked:
@@ -368,13 +377,14 @@ class HLSExtractor:
                     if element:
                         is_visible = await element.is_visible()
                         if is_visible:
-                            print(f"  → Method 3: Clicking {selector}")
+                            logger.debug(f"Method 3: Clicking {selector}")
                             await element.click(timeout=3000, force=True)
                             await asyncio.sleep(3)
                             await self.close_new_tabs(context, page)
-                            print("  ✓ Clicked play button!")
+                            logger.info("Clicked play button via selector!")
                             return True
-                except:
+                except Exception as e:
+                    logger.debug(f"Selector {selector} failed: {e}")
                     continue
             
             # Methode 4: Klicke auf das Video selbst
@@ -508,10 +518,10 @@ class HLSExtractor:
                         if request.resource_type in ['font']:
                             await route.abort()
                             return
-                        
-                    except:
-                        pass
-                    
+
+                    except Exception as e:
+                        logger.debug(f"Ad filter check error: {e}")
+
                     await route.continue_()
                 
                 await page.route("**/*", block_ads_brave)
@@ -567,40 +577,40 @@ class HLSExtractor:
                         self.metadata.series_name = await series_element.inner_text()
                         self.metadata.series_name_display = self.metadata.series_name
                         log(f"✓ Series (from hosterSeriesTitle): {self.metadata.series_name}")
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Could not extract series from hosterSeriesTitle: {e}")
 
             try:
                 season_meta = await page.query_selector('meta[itemprop="seasonNumber"]')
                 if season_meta:
                     self.metadata.season = await season_meta.get_attribute('content')
                     log(f"✓ Season: {self.metadata.season}")
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not extract season metadata: {e}")
 
             try:
                 episode_meta = await page.query_selector('meta[itemprop="episode"]')
                 if episode_meta:
                     self.metadata.episode = await episode_meta.get_attribute('content')
                     log(f"✓ Episode: {self.metadata.episode}")
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not extract episode metadata: {e}")
 
             try:
                 german_title = await page.query_selector('.episodeGermanTitle')
                 if german_title:
                     self.metadata.episode_title_german = await german_title.inner_text()
                     log(f"✓ German Title: {self.metadata.episode_title_german}")
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not extract German title: {e}")
 
             try:
                 english_title = await page.query_selector('small.episodeEnglishTitle')
                 if english_title:
                     self.metadata.episode_title_english = await english_title.inner_text()
                     log(f"✓ English Title: {self.metadata.episode_title_english}")
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not extract English title: {e}")
 
             if not self.metadata.series_name:
                 self._parse_url_fallback(url)
@@ -743,8 +753,8 @@ class HLSExtractor:
                                     try:
                                         await p.close()
                                         closed_count += 1
-                                    except:
-                                        pass
+                                    except Exception as e:
+                                        logger.debug(f"Failed to close popup tab: {e}")
                                 if closed_count > 0:
                                     log(f"  Closed {closed_count} popup tab(s)", "  ")
 
@@ -797,8 +807,8 @@ class HLSExtractor:
                         }''')
                         if available:
                             log(f"  Available languages: {available}", "  ")
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Could not list available languages: {e}")
 
             # ============================================================
             # 18+ POPUPS WEGKLICKEN (falls vorhanden)
@@ -861,8 +871,8 @@ class HLSExtractor:
             
         return self.m3u8_urls
     
-    def _parse_url_fallback(self, url):
-        """Fallback: Parse URL"""
+    def _parse_url_fallback(self, url: str) -> None:
+        """Fallback: Parse URL to extract metadata from URL pattern."""
         pattern = r'/serie/stream/([^/]+)/staffel-(\d+)/episode-(\d+)'
         match = re.search(pattern, url)
         
@@ -875,8 +885,16 @@ class HLSExtractor:
                 self.metadata.episode = match.group(3)
             print(f"✓ Fallback URL parsing successful")
 
-def parse_episode_range(episodes_str):
-    """Parsed Episode-Range String"""
+def parse_episode_range(episodes_str: str) -> List[int]:
+    """
+    Parse episode range string into list of episode numbers.
+
+    Args:
+        episodes_str: String like "1-5,8,10-12"
+
+    Returns:
+        Sorted list of episode numbers
+    """
     episodes = set()
 
     for part in episodes_str.split(','):
@@ -889,10 +907,15 @@ def parse_episode_range(episodes_str):
 
     return sorted(episodes)
 
-async def detect_series_info(url):
+async def detect_series_info(url: str) -> Tuple[Optional[int], Optional[List[int]]]:
     """
-    Detect number of seasons and episodes from series page
-    Returns: (total_seasons, episodes_per_season_dict)
+    Detect number of seasons and episodes from series page.
+
+    Args:
+        url: URL of the series page
+
+    Returns:
+        Tuple of (total_seasons, list_of_episodes) or (None, None) on error
     """
     from playwright.async_api import async_playwright
 
@@ -912,8 +935,8 @@ async def detect_series_info(url):
                 seasons_meta = await page.query_selector('meta[itemprop="numberOfSeasons"]')
                 if seasons_meta:
                     total_seasons = int(await seasons_meta.get_attribute('content'))
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not extract number of seasons: {e}")
 
             # Get episodes for current season (if on season page)
             episodes = []
@@ -926,8 +949,8 @@ async def detect_series_info(url):
                         match = re.search(r'/episode-(\d+)', href)
                         if match:
                             episodes.append(int(match.group(1)))
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not extract episode list: {e}")
 
             await browser.close()
 
@@ -937,9 +960,9 @@ async def detect_series_info(url):
         print(f"⚠️  Could not auto-detect series info: {e}")
         return None, None
 
-def parse_flexible_url(url):
+def parse_flexible_url(url: str) -> Tuple[Optional[str], Optional[str], Optional[int], Optional[int], Optional[str]]:
     """
-    Parse URL with flexible format support for both series and anime:
+    Parse URL with flexible format support for both series and anime.
 
     Series patterns:
     1. http://site/serie/stream/NAME
@@ -951,7 +974,12 @@ def parse_flexible_url(url):
     5. http://site/anime/stream/NAME/staffel-N
     6. http://site/anime/stream/NAME/staffel-N/episode-N
 
-    Returns: (base_url, series_slug, season, episode, url_type)
+    Args:
+        url: The URL to parse
+
+    Returns:
+        Tuple of (base_url, series_slug, season, episode, url_type)
+        where url_type is 'anime' or 'series'
     """
     # Try ANIME patterns first (more specific)
     # Pattern A1: Full URL with season and episode (anime)

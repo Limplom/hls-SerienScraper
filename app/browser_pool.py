@@ -13,6 +13,8 @@ import asyncio
 from typing import List, Optional
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
+from app.config import Config
+
 
 # Optimized browser launch arguments for speed and stability
 BROWSER_ARGS = [
@@ -78,7 +80,7 @@ class BrowserPool:
         self.available_contexts: asyncio.Queue = asyncio.Queue()
         self._initialized = False
         self._context_use_count: dict = {}  # Track usage for recycling
-        self._max_context_uses = 50  # Recycle context after N uses
+        self._max_context_uses = Config.BROWSER_MAX_CONTEXT_USES  # Recycle context after N uses
 
     async def initialize(self):
         """Initialize the browser pool with optimized settings"""
@@ -116,7 +118,10 @@ class BrowserPool:
         ua = USER_AGENTS[index % len(USER_AGENTS)]
 
         context = await self.browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
+            viewport={
+                'width': Config.BROWSER_VIEWPORT_WIDTH,
+                'height': Config.BROWSER_VIEWPORT_HEIGHT
+            },
             user_agent=ua,
             java_script_enabled=True,
             ignore_https_errors=True,

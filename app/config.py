@@ -55,7 +55,13 @@ class Config:
 
     DOWNLOAD_PATH = property(lambda self: Config.get_download_path())
 
-    # Max parallel downloads
+    # Max parallel downloads - absolute maximum allowed (hard limit)
+    MAX_PARALLEL_LIMIT = int(os.getenv(
+        'HLS_MAX_PARALLEL_LIMIT',
+        _json_settings.get('max_parallel_limit', 10)
+    ))
+
+    # Default parallel downloads at startup (can be changed at runtime)
     MAX_PARALLEL_DOWNLOADS = int(os.getenv(
         'HLS_MAX_PARALLEL',
         _json_settings.get('max_parallel_downloads', 3)
@@ -128,39 +134,31 @@ class Config:
     ))
 
     # ===========================================
-    # FLASK / DATABASE SETTINGS
+    # BROWSER SETTINGS
     # ===========================================
-
-    # Database
-    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL', 'sqlite:///hls_downloader.db')
-    SQLALCHEMY_TRACK_MODIFICATIONS = False
-
-    # Redis
-    REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
-
-    # Celery
-    CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/1')
-    CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/2')
-    CELERY_TASK_SERIALIZER = 'json'
-    CELERY_RESULT_SERIALIZER = 'json'
-    CELERY_ACCEPT_CONTENT = ['json']
-    CELERY_TIMEZONE = 'Europe/Berlin'
-    CELERY_TASK_TRACK_STARTED = True
-    CELERY_TASK_TIME_LIMIT = 3600  # 1 hour max per task
-
-    # Rate Limiting
-    RATELIMIT_STORAGE_URL = os.getenv('RATELIMIT_STORAGE_URL', 'redis://localhost:6379/3')
-    RATELIMIT_STRATEGY = 'fixed-window'
-    MAX_DOWNLOADS_PER_USER = int(os.getenv('MAX_DOWNLOADS_PER_USER', 3))
-    MAX_DOWNLOADS_PER_HOUR = int(os.getenv('MAX_DOWNLOADS_PER_HOUR', 20))
 
     # Browser Pool
     MAX_CONCURRENT_BROWSERS = int(os.getenv('MAX_CONCURRENT_BROWSERS', 10))
     BROWSER_TIMEOUT = int(os.getenv('BROWSER_TIMEOUT', 300))
+    BROWSER_VIEWPORT_WIDTH = int(os.getenv('BROWSER_VIEWPORT_WIDTH', 1920))
+    BROWSER_VIEWPORT_HEIGHT = int(os.getenv('BROWSER_VIEWPORT_HEIGHT', 1080))
+    BROWSER_MAX_CONTEXT_USES = int(os.getenv('BROWSER_MAX_CONTEXT_USES', 50))
+
+    # Timeouts (in milliseconds)
+    PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', 60000))
+    ELEMENT_WAIT_TIMEOUT = int(os.getenv('ELEMENT_WAIT_TIMEOUT', 5000))
+
+    # ===========================================
+    # SOURCE URLs (configurable for flexibility)
+    # ===========================================
+    SERIEN_BASE_URL = os.getenv('SERIEN_BASE_URL', 'http://186.2.175.5')
+    ANIME_BASE_URL = os.getenv('ANIME_BASE_URL', 'https://aniworld.to')
+
+    # ===========================================
+    # FLASK SETTINGS
+    # ===========================================
 
     # Session
-    SESSION_TYPE = 'redis'
-    SESSION_REDIS = None  # Will be set at runtime
     SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', 'False').lower() == 'true'
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'
@@ -169,9 +167,8 @@ class Config:
     # File Upload
     MAX_CONTENT_LENGTH = int(os.getenv('MAX_CONTENT_LENGTH', 16 * 1024 * 1024))  # 16MB
 
-    # SocketIO
-    SOCKETIO_MESSAGE_QUEUE = None  # Will be set at runtime
-    SOCKETIO_CHANNEL = 'hls-downloader'
+    # CORS
+    CORS_ORIGINS = os.getenv('CORS_ORIGINS', 'http://localhost:5000')
 
 
 class DevelopmentConfig(Config):
