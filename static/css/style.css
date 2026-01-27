@@ -1647,6 +1647,38 @@ footer {
     transform: translateY(-1px);
 }
 
+/* Queue item action buttons */
+.download-card-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-left: auto;
+}
+
+.btn-queue-cancel,
+.btn-queue-remove {
+    background: transparent;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    padding: 0.3rem 0.5rem;
+    border-radius: 0.25rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all 0.2s ease;
+    line-height: 1;
+}
+
+.btn-queue-cancel:hover {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: #ef4444;
+    color: #ef4444;
+}
+
+.btn-queue-remove:hover {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: #ef4444;
+    color: #ef4444;
+}
+
 .queue-empty {
     text-align: center;
     padding: 2rem;
@@ -2995,101 +3027,6 @@ footer {
 .batch-actions .btn-primary:hover {
     background: rgba(255, 255, 255, 0.9);
     transform: translateY(-2px);
-}
-
-/* Download Bulk Action Bar */
-.download-bulk-bar {
-    position: sticky;
-    top: 0;
-    z-index: 10;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.75rem 1rem;
-    background: linear-gradient(135deg, var(--primary-color), #8b5cf6);
-    border-radius: 0.5rem;
-    margin-bottom: 1rem;
-    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
-    animation: slideDown 0.3s ease;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-}
-
-.download-bulk-bar .bulk-info {
-    display: flex;
-    align-items: center;
-}
-
-#downloadSelectedCount {
-    font-size: 1rem;
-    font-weight: 700;
-    color: white;
-}
-
-.download-bulk-bar .bulk-actions {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-}
-
-.download-bulk-bar .btn-small {
-    background: rgba(255, 255, 255, 0.2);
-    color: white;
-    border: 1px solid rgba(255, 255, 255, 0.3);
-    font-weight: 600;
-    transition: all 0.3s ease;
-    padding: 0.35rem 0.7rem;
-    font-size: 0.85rem;
-}
-
-.download-bulk-bar .btn-small:hover {
-    background: rgba(255, 255, 255, 0.3);
-    border-color: white;
-    transform: translateY(-1px);
-}
-
-.download-bulk-bar .btn-danger {
-    background: rgba(239, 68, 68, 0.8);
-    border-color: rgba(239, 68, 68, 0.9);
-}
-
-.download-bulk-bar .btn-danger:hover {
-    background: rgba(239, 68, 68, 1);
-}
-
-.bulk-priority-select {
-    background: rgba(255, 255, 255, 0.2) !important;
-    color: white !important;
-    border: 1px solid rgba(255, 255, 255, 0.3) !important;
-    padding: 0.35rem 0.5rem;
-    font-size: 0.85rem;
-}
-
-.bulk-priority-select option {
-    background: var(--bg-card);
-    color: var(--text-primary);
-}
-
-/* Download Checkbox Styling */
-.download-checkbox {
-    width: 20px;
-    height: 20px;
-    margin-right: 0.75rem;
-    cursor: pointer;
-    accent-color: var(--primary-color);
-    flex-shrink: 0;
-}
-
-.download-card.selected {
-    border-color: var(--primary-color);
-    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.3);
-}
-
-/* Button active state for bulk mode toggle */
-#bulkDownloadModeBtn.active {
-    background: var(--primary-color);
-    color: white;
-    border-color: var(--primary-color);
 }
 
 /* Drag & Drop Styling */

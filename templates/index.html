@@ -242,23 +242,8 @@
                     <h2>📥 Downloads</h2>
                     <div class="log-controls">
                         <button class="btn-small" onclick="consolidateAllDuplicates()" id="consolidateDuplicatesBtn" title="Merge duplicate series" style="display: none;">🔗 Merge</button>
-                        <button class="btn-small" onclick="toggleBulkDownloadMode()" id="bulkDownloadModeBtn" title="Select multiple">☑️ Multi-Select</button>
                         <button class="btn-small" onclick="refreshQueue()" title="Refresh">🔄</button>
                         <button class="btn-small" onclick="clearOldQueue()" title="Remove old">🗑️</button>
-                    </div>
-                </div>
-
-                <!-- Bulk Action Bar (hidden by default) -->
-                <div id="downloadBulkBar" class="bulk-action-bar download-bulk-bar" style="display: none;">
-                    <div class="bulk-info">
-                        <span id="downloadSelectedCount">0 selected</span>
-                    </div>
-                    <div class="bulk-actions">
-                        <button class="btn-small" onclick="selectAllDownloads()">☑️ All</button>
-                        <button class="btn-small" onclick="clearDownloadSelection()">✕ None</button>
-                        <button class="btn-small" onclick="bulkPauseDownloads()">⏸️ Pause</button>
-                        <button class="btn-small" onclick="bulkResumeDownloads()">▶️ Resume</button>
-                        <button class="btn-small btn-danger" onclick="bulkCancelDownloads()">❌ Cancel</button>
                     </div>
                 </div>
 

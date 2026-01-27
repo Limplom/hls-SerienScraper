@@ -6,6 +6,18 @@ Run this file to start the web GUI in development mode.
 import sys
 import os
 
+# IMPORTANT: Disable output buffering FIRST (before any other imports)
+# This ensures print() output from threads is displayed immediately
+os.environ['PYTHONUNBUFFERED'] = '1'
+
+# Fix Windows console encoding for emoji support
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
+    except Exception:
+        pass  # Fallback if reconfigure fails
+
 # Add app directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'app'))
 

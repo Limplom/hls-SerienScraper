@@ -18,9 +18,19 @@ from urllib.parse import urlparse
 import time
 import logging
 from typing import Optional, List, Dict, Any, Tuple, Set
+from concurrent.futures import ThreadPoolExecutor
+
+# Import config for browser settings
+try:
+    from app import config as app_config
+except ImportError:
+    app_config = None  # Fallback when running standalone
 
 # Setup logging
 logger = logging.getLogger(__name__)
+
+# Global ThreadPoolExecutor for download operations (reused to avoid overhead)
+_DOWNLOAD_EXECUTOR = ThreadPoolExecutor(max_workers=10, thread_name_prefix="HLSDownload")
 
 class VideoMetadata:
     def __init__(self):
@@ -62,6 +72,7 @@ class HLSExtractor:
         self.master_playlist = None
         self.metadata = VideoMetadata()
         self.ad_filters = set()
+        self._m3u8_event = None  # Event for instant m3u8 detection (created per extraction)
     
     def load_brave_filters(self):
         """Lädt Brave-kompatible Filterlisten"""
@@ -221,185 +232,212 @@ class HLSExtractor:
         return clicked_count
     
     async def click_play_button(self, page, context):
-        """Klickt den Play-Button - FIXED für role='button' Elements"""
+        """Klickt den Play-Button - OPTIMIERT mit wait_for_selector"""
         print("\n▶️  Looking for Play button...")
-        
-        # Warte bis iframes geladen sind
-        print("  Waiting for iframe to load...")
-        await asyncio.sleep(5)
-        
-        # Scroll nochmal um sicherzustellen dass iframe im Viewport ist
+
+        # Scroll um iframe im Viewport zu haben
         try:
             await page.evaluate("window.scrollBy(0, 200)")
-            await asyncio.sleep(1)
         except Exception as e:
             logger.debug(f"Scroll failed: {e}")
-        
-        # Finde den richtigen iframe (der mit dem Video)
+
+        # OPTIMIERT: Warte auf Video-Frame mit wait_for_selector statt fester 5s
+        print("  Waiting for video iframe to load (smart wait)...")
         video_frame = None
-        for frame in page.frames:
-            if frame == page.main_frame:
-                continue
-            
-            # Ignore about:blank
-            if not frame.url or frame.url == 'about:blank':
-                continue
-            
-            try:
-                video = await frame.query_selector('video')
-                if video:
-                    logger.info(f"Found video iframe: {frame.url[:80]}")
-                    video_frame = frame
+        max_frame_wait = 15000  # 15s timeout (statt feste 5s)
+
+        try:
+            # Warte bis ein iframe mit Video erscheint
+            start_wait = asyncio.get_event_loop().time()
+
+            while (asyncio.get_event_loop().time() - start_wait) < (max_frame_wait / 1000):
+                for frame in page.frames:
+                    if frame == page.main_frame:
+                        continue
+                    if not frame.url or frame.url == 'about:blank':
+                        continue
+
+                    try:
+                        # wait_for_selector ist viel effizienter als query_selector + sleep
+                        video = await frame.wait_for_selector('video', timeout=2000)
+                        if video:
+                            elapsed = asyncio.get_event_loop().time() - start_wait
+                            print(f"  ✓ Video iframe found in {elapsed:.1f}s!")
+                            logger.info(f"Found video iframe: {frame.url[:80]}")
+                            video_frame = frame
+                            break
+                    except Exception:
+                        continue
+
+                if video_frame:
                     break
-            except Exception as e:
-                logger.debug(f"Frame query error: {e}")
-                continue
-        
+                await asyncio.sleep(0.5)  # Kurzes Polling zwischen Frame-Checks
+
+        except Exception as e:
+            logger.debug(f"Frame wait error: {e}")
+
         if not video_frame:
-            print("  ⚠ No video iframe found yet")
+            print("  ⚠ No video iframe found after 15s")
             return False
         
-        print("  Trying multiple methods to start playback...")
-        
-        # Versuche mehrmals
-        max_attempts = 3
-        
-        for attempt in range(max_attempts):
-            if attempt > 0:
-                print(f"\n  Retry #{attempt}...")
-                await asyncio.sleep(3)
-            
-            # Methode 1: Suche nach role='button' mit "Spielen" oder "Play" Text
-            # WICHTIG: Muss MEHRMALS geklickt werden wegen Werbe-Layern!
-            try:
-                print("  → Method 1: Looking for [role='button'] with 'Play'/'Spielen' text")
-                
-                # Verschiedene Text-Varianten
-                play_texts = ['Spielen', 'Play', 'Abspielen', 'play', 'spielen']
-                
-                found_and_clicked = False
-                
-                for text in play_texts:
-                    try:
-                        # Suche nach role=button mit diesem Text
-                        play_button = await video_frame.query_selector(f'[role="button"]:has-text("{text}")')
-                        if play_button:
-                            is_visible = await play_button.is_visible()
-                            if is_visible:
-                                button_text = await play_button.inner_text()
-                                print(f"  ✓ Found play button: role=button with text '{button_text}'")
-                                
-                                # WICHTIG: Klicke MEHRMALS wegen Werbe-Layern!
-                                click_attempts = 8  # Mehr Clicks für Werbe-Layer
-                                for click_num in range(1, click_attempts + 1):
-                                    try:
-                                        # Prüfe ob Button noch da ist
-                                        current_button = await video_frame.query_selector(f'[role="button"]:has-text("{text}")')
-                                        if current_button:
-                                            is_still_visible = await current_button.is_visible()
-                                            if is_still_visible:
-                                                await current_button.click(timeout=2000, force=True)
-                                                print(f"    Click #{click_num}/8 on play button")
-                                                await asyncio.sleep(1.5)
-                                                
-                                                # Schließe Werbe-Tabs nach jedem Click
-                                                closed = await self.close_new_tabs(context, page)
-                                                if closed > 0:
-                                                    print(f"      → Closed {closed} ad tab(s)")
-                                            else:
-                                                print(f"    Button not visible anymore after {click_num-1} clicks")
-                                                break
-                                        else:
-                                            print(f"    Button disappeared after {click_num-1} clicks")
-                                            break
-                                    except Exception as e:
-                                        print(f"    Click #{click_num} failed: {e}")
-                                        continue
-                                
-                                logger.info(f"Clicked play button {click_num} times!")
-                                found_and_clicked = True
+        print("  Trying optimized playback methods...")
 
-                                # Extra Pause nach allen Clicks
-                                await asyncio.sleep(3)
-                                return True
-                    except Exception as e:
-                        logger.debug(f"Play button search for '{text}' failed: {e}")
-                        continue
-                
-                if not found_and_clicked:
-                    print("  → No role=button play button found, trying other methods...")
-            except Exception as e:
-                print(f"  ✗ role=button search failed: {e}")
-            
-            # Methode 2: JavaScript play()
-            try:
-                print("  → Method 2: JavaScript play()")
-                result = await video_frame.evaluate("""
-                    () => {
-                        const videos = document.querySelectorAll('video');
-                        let played = false;
-                        videos.forEach(v => {
-                            try {
-                                v.muted = false;
-                                v.play();
-                                played = true;
-                            } catch(e) {
-                                try {
-                                    v.muted = true;
-                                    v.play();
-                                    played = true;
-                                } catch(e2) {}
-                            }
-                        });
-                        return played;
-                    }
-                """)
-                if result:
-                    print("  ✓ Video.play() executed!")
-                    await asyncio.sleep(3)
-                    await self.close_new_tabs(context, page)
+        # ============================================================
+        # OPTIMIERT: Prüfe zuerst ob Video bereits spielt (readyState)
+        # ============================================================
+        try:
+            video_state = await video_frame.evaluate("""
+                () => {
+                    const video = document.querySelector('video');
+                    if (!video) return null;
+                    return {
+                        paused: video.paused,
+                        readyState: video.readyState,
+                        currentTime: video.currentTime
+                    };
+                }
+            """)
+            if video_state:
+                if not video_state.get('paused') and video_state.get('currentTime', 0) > 0:
+                    print("  ✓ Video already playing! Skipping play clicks.")
                     return True
-            except Exception as e:
-                print(f"  ✗ JS play failed: {e}")
-            
-            # Methode 3: Klicke auf JW Player Display Icons
+                print(f"  Video state: paused={video_state.get('paused')}, readyState={video_state.get('readyState')}")
+        except Exception as e:
+            logger.debug(f"Video state check failed: {e}")
+
+        # ============================================================
+        # Methode 1: Smart Play-Button Click mit Video-Start-Check
+        # ============================================================
+        try:
+            print("  → Method 1: Smart play button detection")
+
+            # Kombinierter Selector für alle Play-Button Varianten
             play_selectors = [
+                '[role="button"]:has-text("Spielen")',
+                '[role="button"]:has-text("Play")',
                 '.jw-icon-playback',
                 '.jw-display-icon-container',
-                '.jw-display-icon-display',
                 'button[aria-label*="Play" i]',
-                '[class*="play-button"]',
             ]
-            
+
             for selector in play_selectors:
                 try:
-                    element = await video_frame.query_selector(selector)
-                    if element:
-                        is_visible = await element.is_visible()
-                        if is_visible:
-                            logger.debug(f"Method 3: Clicking {selector}")
-                            await element.click(timeout=3000, force=True)
-                            await asyncio.sleep(3)
-                            await self.close_new_tabs(context, page)
-                            logger.info("Clicked play button via selector!")
-                            return True
-                except Exception as e:
-                    logger.debug(f"Selector {selector} failed: {e}")
-                    continue
-            
-            # Methode 4: Klicke auf das Video selbst
+                    # wait_for_selector ist effizienter als query_selector
+                    play_button = await video_frame.wait_for_selector(
+                        selector,
+                        state='visible',
+                        timeout=3000
+                    )
+                    if play_button:
+                        print(f"  ✓ Found play button: {selector}")
+
+                        # SMART CLICK: Max 4 Clicks mit Video-Start-Check
+                        for click_num in range(1, 5):
+                            try:
+                                await play_button.click(timeout=2000, force=True)
+                                print(f"    Click #{click_num}")
+
+                                # Schließe Werbe-Tabs
+                                closed = await self.close_new_tabs(context, page)
+                                if closed > 0:
+                                    print(f"      → Closed {closed} ad tab(s)")
+
+                                # OPTIMIERT: Prüfe ob Video gestartet hat
+                                try:
+                                    # wait_for_function statt fester Sleep!
+                                    await video_frame.wait_for_function(
+                                        '() => { const v = document.querySelector("video"); return v && !v.paused && v.currentTime > 0; }',
+                                        timeout=3000
+                                    )
+                                    print(f"  ✓ Video started playing after {click_num} click(s)!")
+                                    return True
+                                except Exception:
+                                    # Video noch nicht gestartet, nächster Click
+                                    pass
+
+                                # Re-query button (kann verschwunden sein)
+                                play_button = await video_frame.query_selector(selector)
+                                if not play_button:
+                                    break
+
+                            except Exception as e:
+                                logger.debug(f"Click #{click_num} error: {e}")
+                                break
+
+                except Exception:
+                    continue  # Nächster Selector
+
+        except Exception as e:
+            logger.debug(f"Smart play button failed: {e}")
+
+        # ============================================================
+        # Methode 2: JavaScript video.play() mit readyState check
+        # ============================================================
+        try:
+            print("  → Method 2: JavaScript play() with readiness check")
+
+            # Warte bis Video bereit ist (readyState >= 2)
             try:
-                print("  → Method 4: Clicking video element")
-                video = await video_frame.query_selector('video')
-                if video:
-                    await video.click(timeout=3000, force=True)
-                    await asyncio.sleep(3)
-                    await self.close_new_tabs(context, page)
-                    print("  ✓ Clicked video element!")
+                await video_frame.wait_for_function(
+                    '() => { const v = document.querySelector("video"); return v && v.readyState >= 2; }',
+                    timeout=5000
+                )
+                print("    Video is ready (readyState >= 2)")
+            except Exception:
+                print("    Video not fully ready, trying play() anyway...")
+
+            result = await video_frame.evaluate("""
+                () => {
+                    const videos = document.querySelectorAll('video');
+                    let played = false;
+                    videos.forEach(v => {
+                        try {
+                            v.play().then(() => { played = true; }).catch(() => {});
+                        } catch(e) {}
+                    });
+                    return played;
+                }
+            """)
+            if result:
+                print("  ✓ Video.play() executed!")
+                await self.close_new_tabs(context, page)
+
+                # Kurze Wartezeit für Play-Start
+                try:
+                    await video_frame.wait_for_function(
+                        '() => { const v = document.querySelector("video"); return v && !v.paused; }',
+                        timeout=3000
+                    )
+                    print("  ✓ Video is now playing!")
                     return True
-            except Exception as e:
-                print(f"  ✗ Video click failed: {e}")
-        
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"JS play failed: {e}")
+
+        # ============================================================
+        # Methode 3: Klicke direkt auf Video-Element
+        # ============================================================
+        try:
+            print("  → Method 3: Direct video click")
+            video = await video_frame.query_selector('video')
+            if video:
+                await video.click(timeout=3000, force=True)
+                await self.close_new_tabs(context, page)
+
+                # Check ob Video gestartet
+                try:
+                    await video_frame.wait_for_function(
+                        '() => { const v = document.querySelector("video"); return v && !v.paused; }',
+                        timeout=3000
+                    )
+                    print("  ✓ Video started via direct click!")
+                    return True
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Video click failed: {e}")
+
         print("  ⚠ All play methods tried - video might need manual start")
         return False
     
@@ -419,6 +457,7 @@ class HLSExtractor:
         self.master_playlist = None
         self.metadata = VideoMetadata()
         self.browser_id = browser_id  # For logging
+        self._m3u8_event = asyncio.Event()  # Event-based m3u8 detection (instant!)
 
         # Helper function for logging with browser ID
         def log(msg, prefix=""):
@@ -428,14 +467,29 @@ class HLSExtractor:
                 print(f"{prefix}{msg}")
 
         async with async_playwright() as p:
+            # Browser arguments
+            browser_args = [
+                '--no-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--mute-audio',  # Browser-Level Audio-Mute
+                '--autoplay-policy=no-user-gesture-required'
+            ]
+
+            # Get browser settings from config (with fallbacks for standalone mode)
+            headless = False
+            if app_config:
+                headless = getattr(app_config.Config, 'BROWSER_HEADLESS', False)
+
+            # Start browser off-screen when not headless (--start-minimized doesn't work with Playwright)
+            if not headless:
+                browser_args.extend([
+                    '--window-position=-2400,-2400',  # Off-screen position
+                    '--window-size=1280,720'
+                ])
+
             browser = await p.chromium.launch(
-                headless=False,
-                args=[
-                    '--no-sandbox',
-                    '--disable-blink-features=AutomationControlled',
-                    '--mute-audio',  # Browser-Level Audio-Mute
-                    '--autoplay-policy=no-user-gesture-required'
-                ]
+                headless=headless,
+                args=browser_args
             )
 
             # Context mit MUTED Audio (kein Ton nötig!)
@@ -537,6 +591,8 @@ class HLSExtractor:
                     self.m3u8_urls.append(url)
                     if not self.master_playlist and ('master' in url.lower() or len(self.m3u8_urls) == 1):
                         self.master_playlist = url
+                    # Trigger event immediately! (no more 2s polling delay)
+                    self._m3u8_event.set()
 
             page.on("request", handle_request)
 
@@ -831,30 +887,21 @@ class HLSExtractor:
                 print("  ⚠ Play button not clicked - video might auto-play or need manual start")
             
             # ============================================================
-            # WARTE AUF M3U8
+            # WARTE AUF M3U8 (Event-basiert - SOFORTIGE Erkennung!)
             # ============================================================
 
-            log(f"⏳ Waiting up to {wait_time}s for m3u8...", "\n")
-            log("(Based on recording: usually takes 40-50 seconds)", "   ")
-            
+            log(f"⏳ Waiting up to {wait_time}s for m3u8 (event-based)...", "\n")
+
             start_time = asyncio.get_event_loop().time()
-            check_interval = 2
-            
-            while (asyncio.get_event_loop().time() - start_time) < wait_time:
+
+            try:
+                # Event-basiertes Warten - reagiert SOFORT wenn m3u8 gefunden!
+                # Kein 2-Sekunden-Polling mehr nötig!
+                await asyncio.wait_for(self._m3u8_event.wait(), timeout=wait_time)
                 elapsed = asyncio.get_event_loop().time() - start_time
-                remaining = wait_time - elapsed
-
-                if self.m3u8_urls:
-                    log(f"✅ SUCCESS! m3u8 found after {elapsed:.1f} seconds!", "\n")
-                    log("🔒 Closing browser to free resources...")
-                    break
-
-                if int(elapsed) % 10 == 0 and elapsed > 1:
-                    log(f"[{elapsed:.0f}s] Still waiting... ({remaining:.0f}s remaining)", "  ")
-
-                await asyncio.sleep(check_interval)
-
-            if not self.m3u8_urls:
+                log(f"✅ SUCCESS! m3u8 found after {elapsed:.1f} seconds! (event-based)", "\n")
+                log("🔒 Closing browser to free resources...")
+            except asyncio.TimeoutError:
                 log(f"❌ No m3u8 found after {wait_time}s", "\n")
                 log("Try:", "   ")
                 log("1. Increase --wait to 70 or 80", "   ")
@@ -1127,21 +1174,19 @@ def download_video_sync(m3u8_url, output_path, quality="best"):
 
 
 async def download_video(m3u8_url, output_path, quality="best"):
-    """Async wrapper for download_video - runs in thread executor"""
+    """Async wrapper for download_video - uses global executor to avoid overhead"""
     import asyncio
-    import concurrent.futures
 
     loop = asyncio.get_event_loop()
 
-    # Run the synchronous download in a thread pool
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        result = await loop.run_in_executor(
-            executor,
-            download_video_sync,
-            m3u8_url,
-            output_path,
-            quality
-        )
+    # Use global executor instead of creating a new one (saves ~50-100ms per download)
+    result = await loop.run_in_executor(
+        _DOWNLOAD_EXECUTOR,
+        download_video_sync,
+        m3u8_url,
+        output_path,
+        quality
+    )
 
     return result
 

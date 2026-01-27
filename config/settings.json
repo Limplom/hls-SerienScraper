@@ -6,6 +6,8 @@
     "default_quality": "1080p",
     "default_wait_time": 45,
     "audio_only": false,
+    "browser_max_context_uses": 75,
+    "browser_headless": true,
 
     "auto_scraper": {
         "enabled": true,

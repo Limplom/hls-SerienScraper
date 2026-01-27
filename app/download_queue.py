@@ -62,6 +62,9 @@ class QueueItem:
         # Individual episode tracking for UI
         # {episode_key: {status: 'queued'|'downloading'|'completed'|'failed', progress: 0-100, ...}}
         self.episode_status = {}
+        # Pending merged episodes (added while download is processing)
+        # {season_num: [episode_numbers]}
+        self.pending_merged_episodes = {}
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization"""
@@ -85,7 +88,8 @@ class QueueItem:
             'auto_retry_enabled': self.auto_retry_enabled,
             'max_retries': self.max_retries,
             'episode_retry_counts': self.episode_retry_counts,
-            'episode_status': self.episode_status
+            'episode_status': self.episode_status,
+            'pending_merged_episodes': self.pending_merged_episodes
         }
 
     @staticmethod
@@ -118,6 +122,7 @@ class QueueItem:
         item.max_retries = data.get('max_retries', 3)
         item.episode_retry_counts = data.get('episode_retry_counts', {})
         item.episode_status = data.get('episode_status', {})
+        item.pending_merged_episodes = data.get('pending_merged_episodes', {})
         return item
 
 
@@ -255,6 +260,23 @@ class DownloadQueueManager:
             item.options['episodes_per_season'] = existing_eps
             item.total_episodes += len(added_episodes)
 
+            # If item is actively processing, track new episodes as pending
+            # These will be picked up after the current download batch completes
+            is_processing = item.status == DownloadStatus.PROCESSING
+            if is_processing and added_episodes:
+                for season, episodes in new_episodes_per_season.items():
+                    season = int(season)
+                    for ep in episodes:
+                        ep_key = f"S{season:02d}E{ep:02d}"
+                        # Only add if it was actually added (not already existing)
+                        if ep_key in added_episodes:
+                            if season not in item.pending_merged_episodes:
+                                item.pending_merged_episodes[season] = []
+                            if ep not in item.pending_merged_episodes[season]:
+                                item.pending_merged_episodes[season].append(ep)
+
+                print(f"⏳ {len(added_episodes)} episodes queued as pending (download in progress)")
+
             self.save_queue()
 
             print(f"🔗 Merged {len(added_episodes)} episodes into {item.series_name} (Session: {session_id})")
@@ -267,7 +289,8 @@ class DownloadQueueManager:
                 'success': True,
                 'added_episodes': added_episodes,
                 'already_exists': already_exists,
-                'total_new': len(added_episodes)
+                'total_new': len(added_episodes),
+                'is_processing': is_processing  # Signal that new episodes are pending
             }
 
     def consolidate_series(self, url: str) -> Dict[str, Any]:
@@ -523,10 +546,17 @@ class DownloadQueueManager:
 
             # Create new queue item for retry
             retry_session_id = f"{session_id}_retry_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+            # IMPORTANT: Copy options and UPDATE episodes_per_season to ONLY failed episodes!
+            # Bug fix: Previously, the old episodes_per_season from original.options was used,
+            # which caused ALL episodes to be downloaded instead of just failed ones.
+            retry_options = original.options.copy()
+            retry_options['episodes_per_season'] = retry_episodes  # Only failed episodes!
+
             retry_item = QueueItem(
                 session_id=retry_session_id,
                 url=original.url,
-                options=original.options.copy(),
+                options=retry_options,
                 episodes_per_season=retry_episodes
             )
             retry_item.series_name = f"{original.series_name} (Retry)"

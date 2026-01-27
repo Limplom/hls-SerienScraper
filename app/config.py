@@ -132,7 +132,18 @@ class Config:
     BROWSER_TIMEOUT = int(os.getenv('BROWSER_TIMEOUT', 300))
     BROWSER_VIEWPORT_WIDTH = int(os.getenv('BROWSER_VIEWPORT_WIDTH', 1920))
     BROWSER_VIEWPORT_HEIGHT = int(os.getenv('BROWSER_VIEWPORT_HEIGHT', 1080))
-    BROWSER_MAX_CONTEXT_USES = int(os.getenv('BROWSER_MAX_CONTEXT_USES', 50))
+    BROWSER_MAX_CONTEXT_USES = int(os.getenv(
+        'BROWSER_MAX_CONTEXT_USES',
+        _json_settings.get('browser_max_context_uses', 75)
+    ))
+
+    # Browser visibility mode
+    # - headless: false = starts off-screen/hidden (default, best compatibility)
+    # - headless: true = completely invisible (faster, but may be detected by some sites)
+    BROWSER_HEADLESS = os.getenv(
+        'BROWSER_HEADLESS',
+        str(_json_settings.get('browser_headless', False))
+    ).lower() in ('true', '1', 'yes')
 
     # Timeouts (in milliseconds)
     PAGE_LOAD_TIMEOUT = int(os.getenv('PAGE_LOAD_TIMEOUT', 60000))

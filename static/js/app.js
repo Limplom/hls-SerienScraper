@@ -25,12 +25,6 @@ const downloadCardCache = new Map();
 let statisticsUpdatePending = false;
 const STATISTICS_DEBOUNCE_MS = 300;
 
-// ==========================================
-// Bulk Download Selection State
-// ==========================================
-let selectedDownloads = new Set(); // Set of session_ids (first 8 chars)
-let bulkDownloadMode = false;
-
 function scheduleStatisticsUpdate() {
     if (statisticsUpdatePending) return;
     statisticsUpdatePending = true;
@@ -2120,24 +2114,23 @@ function renderQueueFull(queueData, container) {
             ? `<button class="btn-small btn-retry" onclick="retryFailed('${item.session_id}')">Wiederholen (${item.failed_episodes_count})</button>`
             : '';
 
-        const isSelected = selectedDownloads.has(shortSessionId);
-        const checkboxHtml = bulkDownloadMode ? `
-            <input type="checkbox" class="download-checkbox"
-                   data-session="${shortSessionId}"
-                   ${isSelected ? 'checked' : ''}
-                   onclick="toggleDownloadSelection('${shortSessionId}', event)">
-        ` : '';
+        // Queue action buttons (Cancel for active, Remove for finished)
+        let queueActionBtn = '';
+        if (item.status === 'queued' || item.status === 'processing') {
+            queueActionBtn = `<button class="btn-small btn-queue-cancel" onclick="cancelQueueItem('${item.session_id}', event)" title="Download abbrechen">✕</button>`;
+        } else if (item.status === 'completed' || item.status === 'failed' || item.status === 'cancelled') {
+            queueActionBtn = `<button class="btn-small btn-queue-remove" onclick="removeQueueItem('${item.session_id}', event)" title="Aus Liste entfernen">🗑</button>`;
+        }
 
         const episodeStatus = item.episode_status || {};
         const hasEpisodes = Object.keys(episodeStatus).length > 0;
 
         html += `
-            <div class="download-series-container status-${item.status}${isSelected ? ' selected' : ''}"
+            <div class="download-series-container status-${item.status}"
                  data-session="${shortSessionId}"
                  data-session-id="${item.session_id}">
                 <div class="download-series-header" onclick="toggleSeriesCollapse('${shortSessionId}', event)">
                     <button class="series-toggle-btn" title="Ein-/Ausklappen">▼</button>
-                    ${checkboxHtml}
                     <div class="download-card-info">
                         <div class="download-series-name">${escapeHtml(item.series_name || 'Unknown Series')}</div>
                         <span class="download-episode-count">${item.completed_episodes} / ${item.total_episodes} Episodes</span>
@@ -2145,6 +2138,9 @@ function renderQueueFull(queueData, container) {
                     <div class="download-card-status">
                         <span class="download-status-badge status-${item.status}">${statusIcon} ${item.status}</span>
                         ${failedButton}
+                    </div>
+                    <div class="download-card-actions">
+                        ${queueActionBtn}
                     </div>
                 </div>
                 <div class="episode-list-container" id="episodes-${shortSessionId}">
@@ -2206,6 +2202,18 @@ function updateQueueIncremental(queueData) {
             }
         } else if (existingRetryBtn) {
             existingRetryBtn.remove();
+        }
+
+        // Update queue action buttons (Cancel/Remove)
+        const actionsDiv = container.querySelector('.download-card-actions');
+        if (actionsDiv) {
+            let newBtnHtml = '';
+            if (item.status === 'queued' || item.status === 'processing') {
+                newBtnHtml = `<button class="btn-small btn-queue-cancel" onclick="cancelQueueItem('${item.session_id}', event)" title="Download abbrechen">✕</button>`;
+            } else if (item.status === 'completed' || item.status === 'failed' || item.status === 'cancelled') {
+                newBtnHtml = `<button class="btn-small btn-queue-remove" onclick="removeQueueItem('${item.session_id}', event)" title="Aus Liste entfernen">🗑</button>`;
+            }
+            actionsDiv.innerHTML = newBtnHtml;
         }
 
         // Update individual episodes (only if changed)
@@ -2621,196 +2629,59 @@ async function retryFailed(sessionId) {
     }
 }
 
-// ==========================================
-// Bulk Download Actions
-// ==========================================
-
-// Toggle bulk download selection mode
-function toggleBulkDownloadMode() {
-    bulkDownloadMode = !bulkDownloadMode;
-    selectedDownloads.clear();
-    updateBulkDownloadBar();
-    updateQueueStatus(); // Re-render with checkboxes
-
-    const btn = document.getElementById('bulkDownloadModeBtn');
-    if (btn) {
-        btn.classList.toggle('active', bulkDownloadMode);
-        btn.textContent = bulkDownloadMode ? '✓ Selection Mode' : '☑️ Multi-Select';
-    }
-}
-
-// Toggle download selection
-function toggleDownloadSelection(sessionId, event) {
-    if (event) event.stopPropagation();
-
-    if (selectedDownloads.has(sessionId)) {
-        selectedDownloads.delete(sessionId);
-    } else {
-        selectedDownloads.add(sessionId);
-    }
-    updateBulkDownloadBar();
-
-    // Update checkbox visually
-    const checkbox = document.querySelector(`.download-checkbox[data-session="${sessionId}"]`);
-    if (checkbox) {
-        checkbox.checked = selectedDownloads.has(sessionId);
-    }
-}
-
-// Select all downloads
-function selectAllDownloads() {
-    const container = document.getElementById('downloadQueueContainer');
-    if (!container) return;
-
-    container.querySelectorAll('.download-card').forEach(card => {
-        const sessionSpan = card.querySelector('.download-session-id');
-        if (sessionSpan) {
-            const match = sessionSpan.textContent.match(/Session: ([a-f0-9]+)\.\.\./);
-            if (match) {
-                selectedDownloads.add(match[1]);
-            }
-        }
-    });
-
-    // Update all checkboxes
-    container.querySelectorAll('.download-checkbox').forEach(cb => {
-        cb.checked = true;
-    });
-
-    updateBulkDownloadBar();
-}
-
-// Clear all selections
-function clearDownloadSelection() {
-    selectedDownloads.clear();
-
-    // Update all checkboxes
-    document.querySelectorAll('.download-checkbox').forEach(cb => {
-        cb.checked = false;
-    });
-
-    updateBulkDownloadBar();
-}
-
-// Update the bulk action bar display
-function updateBulkDownloadBar() {
-    const bar = document.getElementById('downloadBulkBar');
-    const countSpan = document.getElementById('downloadSelectedCount');
-
-    if (!bar) return;
-
-    if (bulkDownloadMode && selectedDownloads.size > 0) {
-        bar.style.display = 'flex';
-        if (countSpan) {
-            countSpan.textContent = `${selectedDownloads.size} selected`;
-        }
-    } else if (bulkDownloadMode) {
-        bar.style.display = 'flex';
-        if (countSpan) {
-            countSpan.textContent = '0 selected';
-        }
-    } else {
-        bar.style.display = 'none';
-    }
-}
-
-// Bulk pause downloads
-async function bulkPauseDownloads() {
-    if (selectedDownloads.size === 0) {
-        showToast('No downloads selected', 'warning', 3000);
-        return;
-    }
-
-    let successCount = 0;
-    for (const sessionId of selectedDownloads) {
-        try {
-            // Need to find the full session ID
-            const fullSessionId = await findFullSessionId(sessionId);
-            if (fullSessionId) {
-                const response = await fetch(`/api/queue/${fullSessionId}/pause`, { method: 'POST' });
-                if (response.ok) successCount++;
-            }
-        } catch (error) {
-            console.error(`Error pausing ${sessionId}:`, error);
-        }
-    }
-
-    showToast(`${successCount} Download(s) pausiert`, 'success', 3000);
-    selectedDownloads.clear();
-    updateBulkDownloadBar();
-    updateQueueStatus();
-}
-
-// Bulk resume downloads
-async function bulkResumeDownloads() {
-    if (selectedDownloads.size === 0) {
-        showToast('No downloads selected', 'warning', 3000);
-        return;
-    }
-
-    let successCount = 0;
-    for (const sessionId of selectedDownloads) {
-        try {
-            const fullSessionId = await findFullSessionId(sessionId);
-            if (fullSessionId) {
-                const response = await fetch(`/api/queue/${fullSessionId}/resume`, { method: 'POST' });
-                if (response.ok) successCount++;
-            }
-        } catch (error) {
-            console.error(`Error resuming ${sessionId}:`, error);
-        }
-    }
-
-    showToast(`${successCount} Download(s) fortgesetzt`, 'success', 3000);
-    selectedDownloads.clear();
-    updateBulkDownloadBar();
-    updateQueueStatus();
-}
-
-// Bulk cancel downloads
-async function bulkCancelDownloads() {
-    if (selectedDownloads.size === 0) {
-        showToast('No downloads selected', 'warning', 3000);
-        return;
-    }
+// Cancel a queue item (for queued/processing items)
+async function cancelQueueItem(sessionId, event) {
+    event.stopPropagation(); // Prevent collapse toggle
 
     const confirmed = await showConfirm(
-        `Cancel ${selectedDownloads.size} download(s)?`,
-        'Cancel Multiple Downloads',
-        'Yes, cancel all',
-        'No'
+        'Möchtest du diesen Download wirklich abbrechen?',
+        'Download abbrechen',
+        'Ja, abbrechen',
+        'Nein'
     );
     if (!confirmed) return;
 
-    let successCount = 0;
-    for (const sessionId of selectedDownloads) {
-        try {
-            const fullSessionId = await findFullSessionId(sessionId);
-            if (fullSessionId) {
-                const response = await fetch(`/api/queue/${fullSessionId}`, { method: 'DELETE' });
-                if (response.ok) successCount++;
-            }
-        } catch (error) {
-            console.error(`Error cancelling ${sessionId}:`, error);
-        }
-    }
+    try {
+        const response = await fetch(`/api/queue/${sessionId}`, { method: 'DELETE' });
+        const data = await response.json();
 
-    showToast(`${successCount} Download(s) abgebrochen`, 'success', 3000);
-    selectedDownloads.clear();
-    updateBulkDownloadBar();
-    updateQueueStatus();
+        if (response.ok) {
+            showToast('Download wurde abgebrochen', 'success', 3000);
+            updateQueueStatus();
+        } else {
+            showToast(data.error || 'Fehler beim Abbrechen', 'error', 5000);
+        }
+    } catch (error) {
+        console.error('Error cancelling queue item:', error);
+        showToast('Fehler beim Abbrechen des Downloads', 'error', 5000);
+    }
 }
 
-// Helper: Find full session ID from short ID
-async function findFullSessionId(shortId) {
+// Remove a queue item completely (for completed/failed/cancelled items)
+async function removeQueueItem(sessionId, event) {
+    event.stopPropagation(); // Prevent collapse toggle
+
+    const confirmed = await showConfirm(
+        'Möchtest du diesen Eintrag aus der Liste entfernen?',
+        'Eintrag entfernen',
+        'Ja, entfernen',
+        'Nein'
+    );
+    if (!confirmed) return;
+
     try {
-        const response = await fetch('/api/queue');
+        const response = await fetch(`/api/queue/${sessionId}/remove`, { method: 'DELETE' });
         const data = await response.json();
-        const item = data.items.find(i => i.session_id.startsWith(shortId));
-        return item ? item.session_id : null;
+
+        if (response.ok) {
+            showToast('Eintrag wurde entfernt', 'success', 3000);
+            updateQueueStatus();
+        } else {
+            showToast(data.error || 'Fehler beim Entfernen', 'error', 5000);
+        }
     } catch (error) {
-        console.error('Error finding full session ID:', error);
-        return null;
+        console.error('Error removing queue item:', error);
+        showToast('Fehler beim Entfernen des Eintrags', 'error', 5000);
     }
 }
 

@@ -228,6 +228,13 @@ class GlobalEpisodeSemaphore:
 # Initialize global episode semaphore with configured max parallel downloads
 global_episode_semaphore = GlobalEpisodeSemaphore(app_config.MAX_PARALLEL_DOWNLOADS)
 
+# Global ThreadPoolExecutor for download operations (reused instead of creating new ones)
+# This avoids ~50-100ms overhead per download from executor creation
+DOWNLOAD_EXECUTOR = ThreadPoolExecutor(
+    max_workers=app_config.MAX_PARALLEL_LIMIT + 5,
+    thread_name_prefix="DownloadExecutor"
+)
+
 # ==========================================
 # ROBUST QUEUE PROCESSOR CLASS
 # ==========================================
@@ -1661,9 +1668,8 @@ def download_video_with_progress(m3u8_url, output_path, quality="best", codec="a
 
 
 async def download_video(m3u8_url, output_path, quality="best", codec="auto", logger=None, audio_only=False, audio_format="mp3", audio_bitrate="0"):
-    """Async wrapper for download with progress"""
+    """Async wrapper for download with progress - uses global DOWNLOAD_EXECUTOR"""
     import asyncio
-    import concurrent.futures
     from functools import partial
 
     loop = asyncio.get_event_loop()
@@ -1681,8 +1687,8 @@ async def download_video(m3u8_url, output_path, quality="best", codec="auto", lo
         audio_bitrate
     )
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        result = await loop.run_in_executor(executor, download_func)
+    # Use global executor instead of creating a new one (saves ~50-100ms per download)
+    result = await loop.run_in_executor(DOWNLOAD_EXECUTOR, download_func)
 
     return result
 
@@ -2026,273 +2032,244 @@ async def process_download_async(session_id, url, options):
             'episodes': {key: {'status': 'queued', 'progress': 0} for key in all_episode_keys}
         })
 
-        # Loop through each season
-        for season_num in seasons_to_download:
-            if active_downloads[session_id]['status'] == 'cancelled':
-                logger.log("Download cancelled by user", "warning")
-                break
+        # Create args object ONCE (used for all seasons)
+        class Args:
+            def __init__(self, options):
+                self.wait = options.get('wait', app_config.DEFAULT_WAIT_TIME)
+                self.no_adblock = not options.get('adblock', True)
+                self.base_path = Config.get_download_path()
+                self.english_title = options.get('english_title', False)
+                self.series_display = options.get('series_display', None)
+                self.quality = options.get('quality', 'best')
+                self.quality_tag = options.get('quality_tag', app_config.DEFAULT_QUALITY)
+                self.format = options.get('format', app_config.DEFAULT_FORMAT)
+                self.codec = options.get('codec', 'auto')
+                self.no_download = False
+                self.force = options.get('force', False)
+                self.parallel = options.get('parallel', 1)
+                self.audio_only = options.get('audio_only', False)
+                self.audio_format = options.get('audio_format', 'mp3')
+                self.audio_bitrate = options.get('audio_bitrate', '0')
+                self.language = options.get('language', '')
 
-            logger.log(f"📺 Starting Season {season_num}", "info")
-            season = season_num
+        args = Args(options)
+        parallel = args.parallel
 
-            # Get pre-parsed episodes for this season
-            episodes = episodes_per_season.get(season_num, [])
-            if not episodes:
-                logger.log(f"No episodes found for Season {season}, skipping", "warning")
-                continue
+        # =====================================================
+        # PARALLEL MODE: Collect ALL tasks across ALL seasons
+        # Then execute with a SINGLE gather() for true parallelism
+        # =====================================================
+        if parallel > 1 and total_episodes_all_seasons > 1:
+            logger.log(f"🚀 Starting parallel processing (global limit: {global_episode_semaphore.max_concurrent})...", "info")
+            logger.log(f"📊 Collecting tasks for {total_episodes_all_seasons} episodes across {len(seasons_to_download)} season(s)...", "info")
 
-            total = len(episodes)
-            successful = 0
-            failed = 0
-            failed_episodes = []  # Track which episodes failed for this season
+            # Custom print function for filtering verbose logs
+            original_print = print
+            def custom_print(*args, **kwargs):
+                message = ' '.join(map(str, args))
+                critical_patterns = [
+                    '🚀 Download started!', 'Detected URL type:', 'Series:', 'Season:',
+                    '🎯 Found m3u8:', '📥 Starting download:', '📊 Download progress:',
+                    '📊 FFmpeg progress:', '✅ Download complete:', '❌', '⚠️'
+                ]
+                original_print(*args, **kwargs)
+                if any(pattern in message for pattern in critical_patterns):
+                    logger.log(message, "info")
 
-            # Create args object
-            class Args:
-                def __init__(self, options):
-                    self.wait = options.get('wait', app_config.DEFAULT_WAIT_TIME)
-                    self.no_adblock = not options.get('adblock', True)
-                    # Use download path from config (not user-configurable per download)
-                    self.base_path = Config.get_download_path()
-                    self.english_title = options.get('english_title', False)
-                    self.series_display = options.get('series_display', None)
-                    self.quality = options.get('quality', 'best')
-                    self.quality_tag = options.get('quality_tag', app_config.DEFAULT_QUALITY)
-                    self.format = options.get('format', app_config.DEFAULT_FORMAT)
-                    self.codec = options.get('codec', 'auto')  # Video codec preference
-                    self.no_download = False  # Removed from UI
-                    self.force = options.get('force', False)
-                    self.parallel = options.get('parallel', 1)
-                    self.audio_only = options.get('audio_only', False)  # Audio only mode
-                    self.audio_format = options.get('audio_format', 'mp3')  # Audio format (mp3, flac, etc.)
-                    self.audio_bitrate = options.get('audio_bitrate', '0')  # Audio bitrate (0 = best)
-                    self.language = options.get('language', '')  # Language key for download
+            import builtins
+            builtins.print = custom_print
 
-            args = Args(options)
+            try:
+                # Thread-safe counters for live progress updates
+                import threading
+                progress_lock = threading.Lock()
 
-            # Get parallel setting from options (default to 1 for stability)
-            parallel = args.parallel
+                def on_episode_complete(ep_num, ep_season, success):
+                    """Callback called when each episode completes - sends live progress update"""
+                    nonlocal total_successful, total_failed, all_failed_episodes
+                    episode_key = f"S{ep_season:02d}E{ep_num:02d}"
 
-            if parallel > 1 and len(episodes) > 1:
-                # PARALLEL MODE - uses global_episode_semaphore for cross-series limits
-                logger.log(f"🚀 Starting parallel processing (global limit: {global_episode_semaphore.max_concurrent})...", "info")
+                    with progress_lock:
+                        new_status = 'completed' if success else 'failed'
+                        queue_manager.update_episode_status(session_id, episode_key, status=new_status, progress=100 if success else 0)
 
-                # Custom print function for filtering verbose logs - only show end-user relevant info
-                original_print = print
-                def custom_print(*args, **kwargs):
-                    message = ' '.join(map(str, args))
+                        socketio.emit('episode_status_update', {
+                            'session_id': session_id,
+                            'episode_key': episode_key,
+                            'status': new_status,
+                            'progress': 100 if success else 0
+                        })
 
-                    # Only show critical messages for end users
-                    critical_patterns = [
-                        '🚀 Download started!',
-                        'Detected URL type:',
-                        'Series:',
-                        'Season:',
-                        '🎯 Found m3u8:',
-                        '📥 Starting download:',
-                        '📊 Download progress:',
-                        '📊 FFmpeg progress:',
-                        '✅ Download complete:',
-                        '❌',
-                        '⚠️'
-                    ]
+                        if success:
+                            total_successful += 1
+                            queue_manager.reset_retry_count(session_id, episode_key)
+                        else:
+                            total_failed += 1
+                            all_failed_episodes.append(episode_key)
+                            logger.log(f"❌ {episode_key} failed - use manual retry if needed", "error")
 
-                    # Log to console always
-                    original_print(*args, **kwargs)
+                        clear_progress_tracker(session_id, episode_key)
 
-                    # Only send to WebUI if it's critical
-                    if any(pattern in message for pattern in critical_patterns):
-                        logger.log(message, "info")
+                        queue_manager.update_progress(
+                            session_id,
+                            completed=total_successful,
+                            failed_episodes=all_failed_episodes
+                        )
 
-                import builtins
-                builtins.print = custom_print
+                        socketio.emit('progress', {
+                            'session_id': session_id,
+                            'current': total_successful,
+                            'total': total_episodes_all_seasons,
+                            'episode': f"{episode_key} {'✓' if success else '✗'}",
+                            'completed': total_successful
+                        })
 
-                try:
-                    # Thread-safe counters for live progress updates
-                    import threading
-                    progress_lock = threading.Lock()
-                    live_successful = [0]  # Use list to allow modification in closure
-                    live_failed = [0]
+                        emit_aggregated_progress(session_id, total_episodes_all_seasons, total_successful)
 
-                    def on_episode_complete(ep_num, ep_season, success):
-                        """Callback called when each episode completes - sends live progress update"""
-                        nonlocal total_successful, total_failed, all_failed_episodes
-                        episode_key = f"S{ep_season:02d}E{ep_num:02d}"
+                def is_cancelled():
+                    return active_downloads.get(session_id, {}).get('status') == 'cancelled'
 
-                        with progress_lock:
-                            # Update episode status in queue manager
-                            new_status = 'completed' if success else 'failed'
-                            queue_manager.update_episode_status(session_id, episode_key, status=new_status, progress=100 if success else 0)
+                # =====================================================
+                # COLLECT ALL TASKS FROM ALL SEASONS (no gather yet!)
+                # =====================================================
+                all_tasks = []
+                task_info = []  # Track (season, ep_num) for each task
+                max_concurrent = global_episode_semaphore.max_concurrent
+                global_episode_idx = 0
 
-                            # Emit individual episode status update
-                            socketio.emit('episode_status_update', {
-                                'session_id': session_id,
-                                'episode_key': episode_key,
-                                'status': new_status,
-                                'progress': 100 if success else 0
-                            })
+                for season_num in seasons_to_download:
+                    if is_cancelled():
+                        break
 
-                            if success:
-                                live_successful[0] += 1
-                                total_successful += 1
-                                # Reset retry count on success
-                                queue_manager.reset_retry_count(session_id, episode_key)
-                            else:
-                                # Episode failed - add to failed list (no auto-retry, manual retry only)
-                                live_failed[0] += 1
-                                total_failed += 1
-                                all_failed_episodes.append(episode_key)
-                                logger.log(f"❌ {episode_key} failed - use manual retry if needed", "error")
+                    episodes = episodes_per_season.get(season_num, [])
+                    if not episodes:
+                        continue
 
-                            # Clear this episode from the progress tracker (it's done)
-                            clear_progress_tracker(session_id, episode_key)
-
-                            # Update queue manager with completed count
-                            queue_manager.update_progress(
-                                session_id,
-                                completed=total_successful,
-                                failed_episodes=all_failed_episodes
-                            )
-
-                            # Emit live progress update via WebSocket
-                            socketio.emit('progress', {
-                                'session_id': session_id,
-                                'current': total_successful,
-                                'total': total_episodes_all_seasons,
-                                'episode': f"{episode_key} {'✓' if success else '✗'}",
-                                'completed': total_successful
-                            })
-
-                            # Also emit aggregated progress
-                            emit_aggregated_progress(session_id, total_episodes_all_seasons, total_successful)
-
-                    # Create cancel check function
-                    def is_cancelled():
-                        return active_downloads.get(session_id, {}).get('status') == 'cancelled'
-
-                    # Create tasks for all episodes with callback and episode-specific loggers
-                    # Uses global_episode_semaphore internally (no local semaphore needed)
-                    tasks = []
-                    max_concurrent = global_episode_semaphore.max_concurrent
-                    for i, ep_num in enumerate(episodes, 1):
-                        browser_num = ((i - 1) % max_concurrent) + 1
-                        # Create episode-specific logger for progress tracking
-                        episode_key = f"S{season:02d}E{ep_num:02d}"
+                    for ep_num in episodes:
+                        global_episode_idx += 1
+                        browser_num = ((global_episode_idx - 1) % max_concurrent) + 1
+                        episode_key = f"S{season_num:02d}E{ep_num:02d}"
                         episode_logger = WebLogger(session_id, episode_key=episode_key)
+
                         task = process_episode_with_semaphore(
                             ep_num,
                             base_url,
-                            season,
+                            season_num,
                             args,
-                            i,
-                            total,
+                            global_episode_idx,
+                            total_episodes_all_seasons,
                             browser_num,
-                            episode_logger,  # Use episode-specific logger
+                            episode_logger,
                             on_complete=on_episode_complete,
-                            cancel_check=is_cancelled  # Add cancel check
+                            cancel_check=is_cancelled
                         )
-                        tasks.append(task)
+                        all_tasks.append(task)
+                        task_info.append((season_num, ep_num))
 
-                    # Update progress for queued
-                    active_downloads[session_id]['current'] = 0
-                    socketio.emit('progress', {
-                        'session_id': session_id,
-                        'current': total_successful,
-                        'total': total_episodes_all_seasons,
-                        'episode': f"Starting {total} episodes (parallel)",
-                        'completed': total_successful
-                    })
+                logger.log(f"📋 Collected {len(all_tasks)} tasks, starting parallel execution...", "info")
 
-                    # Create periodic progress emitter task
-                    progress_emitter_running = [True]  # Mutable flag to stop the emitter
+                # Update progress for queued
+                active_downloads[session_id]['current'] = 0
+                socketio.emit('progress', {
+                    'session_id': session_id,
+                    'current': total_successful,
+                    'total': total_episodes_all_seasons,
+                    'episode': f"Starting {len(all_tasks)} episodes (parallel across all seasons)",
+                    'completed': total_successful
+                })
 
-                    async def periodic_progress_emitter():
-                        """Emits aggregated progress every 2 seconds during parallel downloads"""
-                        while progress_emitter_running[0]:
-                            await asyncio.sleep(2)  # Emit every 2 seconds
-                            if progress_emitter_running[0]:
-                                with progress_lock:
-                                    current_completed = total_successful
-                                emit_aggregated_progress(session_id, total_episodes_all_seasons, current_completed)
+                # Periodic progress emitter
+                progress_emitter_running = [True]
 
-                    # Start the periodic emitter as a background task
-                    emitter_task = asyncio.create_task(periodic_progress_emitter())
-
-                    try:
-                        # Execute all tasks in parallel
-                        results = await asyncio.gather(*tasks, return_exceptions=True)
-                    finally:
-                        # Stop the periodic emitter
-                        progress_emitter_running[0] = False
-                        emitter_task.cancel()
-                        try:
-                            await emitter_task
-                        except asyncio.CancelledError:
-                            pass
-                        # Clear the progress tracker for this session
-                        clear_progress_tracker(session_id)
-
-                    # Check if cancelled after parallel execution
-                    if is_cancelled():
-                        logger.log("⏹️ Download cancelled during parallel processing", "warning")
-                        break  # Exit season loop
-
-                    # Count only exceptions (successes/failures already counted in callback)
-                    # Note: result=None means cancelled, result=False means failed
-                    cancelled_count = 0
-                    for i, result in enumerate(results):
-                        ep_num = episodes[i]
-                        if result is None:
-                            # Episode was cancelled/skipped
-                            cancelled_count += 1
-                        elif isinstance(result, Exception):
-                            # Exception not caught by callback
+                async def periodic_progress_emitter():
+                    while progress_emitter_running[0]:
+                        await asyncio.sleep(2)
+                        if progress_emitter_running[0]:
                             with progress_lock:
-                                if f"S{season:02d}E{ep_num:02d}" not in all_failed_episodes:
-                                    failed += 1
-                                    failed_episodes.append(ep_num)
-                                    all_failed_episodes.append(f"S{season:02d}E{ep_num:02d}")
-                                    logger.log(f"❌ Episode {ep_num} - Exception: {str(result)}", "error")
-                        elif result:
-                            successful += 1
-                        else:
-                            failed += 1
-                            if ep_num not in failed_episodes:
-                                failed_episodes.append(ep_num)
+                                current_completed = total_successful
+                            emit_aggregated_progress(session_id, total_episodes_all_seasons, current_completed)
 
-                    if cancelled_count > 0:
-                        logger.log(f"⏹️ {cancelled_count} episodes were cancelled/skipped", "warning")
+                emitter_task = asyncio.create_task(periodic_progress_emitter())
 
-                    # Update queue manager with completed count after parallel batch
-                    queue_manager.update_progress(
-                        session_id,
-                        completed=total_successful,
-                        failed_episodes=all_failed_episodes
-                    )
-
-                    # Emit final progress for this season's parallel batch
-                    socketio.emit('progress', {
-                        'session_id': session_id,
-                        'current': total_successful,
-                        'total': total_episodes_all_seasons,
-                        'episode': f"Season {season}: {successful}/{len(episodes)} completed",
-                        'completed': total_successful
-                    })
-
-                    # Update status with totals
-                    socketio.emit('status', {
-                        'session_id': session_id,
-                        'status': 'processing',
-                        'message': f'Season {season} completed: {successful} successful, {failed} failed',
-                        'successful': total_successful,
-                        'failed': total_failed,
-                        'failed_episodes': all_failed_episodes
-                    })
-
+                try:
+                    # =====================================================
+                    # SINGLE gather() FOR ALL TASKS ACROSS ALL SEASONS
+                    # This allows true cross-season parallelism!
+                    # =====================================================
+                    results = await asyncio.gather(*all_tasks, return_exceptions=True)
                 finally:
-                    # Restore original print
-                    builtins.print = original_print
+                    progress_emitter_running[0] = False
+                    emitter_task.cancel()
+                    try:
+                        await emitter_task
+                    except asyncio.CancelledError:
+                        pass
+                    clear_progress_tracker(session_id)
 
-            else:
+                # Process results
+                cancelled_count = 0
+                for i, result in enumerate(results):
+                    season_num, ep_num = task_info[i]
+                    episode_key = f"S{season_num:02d}E{ep_num:02d}"
+                    if result is None:
+                        cancelled_count += 1
+                    elif isinstance(result, Exception):
+                        with progress_lock:
+                            if episode_key not in all_failed_episodes:
+                                all_failed_episodes.append(episode_key)
+                                logger.log(f"❌ {episode_key} - Exception: {str(result)}", "error")
+
+                if cancelled_count > 0:
+                    logger.log(f"⏹️ {cancelled_count} episodes were cancelled/skipped", "warning")
+
+                queue_manager.update_progress(
+                    session_id,
+                    completed=total_successful,
+                    failed_episodes=all_failed_episodes
+                )
+
+                socketio.emit('progress', {
+                    'session_id': session_id,
+                    'current': total_successful,
+                    'total': total_episodes_all_seasons,
+                    'episode': f"All seasons: {total_successful}/{total_episodes_all_seasons} completed",
+                    'completed': total_successful
+                })
+
+                socketio.emit('status', {
+                    'session_id': session_id,
+                    'status': 'processing',
+                    'message': f'Parallel processing completed: {total_successful} successful, {total_failed} failed',
+                    'successful': total_successful,
+                    'failed': total_failed,
+                    'failed_episodes': all_failed_episodes
+                })
+
+            finally:
+                builtins.print = original_print
+
+        else:
+            # =====================================================
+            # SEQUENTIAL MODE: Process seasons one by one
+            # =====================================================
+            for season_num in seasons_to_download:
+                if active_downloads[session_id]['status'] == 'cancelled':
+                    logger.log("Download cancelled by user", "warning")
+                    break
+
+                logger.log(f"📺 Starting Season {season_num}", "info")
+                season = season_num
+
+                episodes = episodes_per_season.get(season_num, [])
+                if not episodes:
+                    logger.log(f"No episodes found for Season {season}, skipping", "warning")
+                    continue
+
+                total = len(episodes)
+                successful = 0
+                failed = 0
+                failed_episodes = []
+
                 # SEQUENTIAL MODE
                 if len(episodes) > 1:
                     logger.log("📝 Sequential processing", "info")
@@ -2564,6 +2541,87 @@ async def process_download_async(session_id, url, options):
 
         # End of extras loop
 
+        # =====================================================
+        # CHECK FOR PENDING MERGED EPISODES
+        # Episodes that were added via merge_episodes() while download was running
+        # =====================================================
+        while True:
+            queue_item = queue_manager.get_item(session_id)
+            if not queue_item or not queue_item.pending_merged_episodes:
+                break
+
+            # Check if cancelled
+            if active_downloads.get(session_id, {}).get('status') == 'cancelled':
+                break
+
+            # Get and clear pending episodes
+            pending_eps = dict(queue_item.pending_merged_episodes)
+            queue_item.pending_merged_episodes = {}
+            queue_manager.save_queue()
+
+            pending_count = sum(len(eps) for eps in pending_eps.values())
+            logger.log(f"🔗 Processing {pending_count} merged episodes...", "info")
+
+            # Update total count
+            total_episodes_all_seasons += pending_count
+            active_downloads[session_id]['total'] = total_episodes_all_seasons
+
+            # Process pending episodes (sequential mode for simplicity)
+            for season_num, episodes in sorted(pending_eps.items()):
+                if active_downloads.get(session_id, {}).get('status') == 'cancelled':
+                    break
+
+                for ep_num in sorted(episodes):
+                    if active_downloads.get(session_id, {}).get('status') == 'cancelled':
+                        break
+
+                    episode_key = f"S{season_num:02d}E{ep_num:02d}"
+                    episode_url = f"{base_url}/staffel-{season_num}/episode-{ep_num}"
+                    current_episode_global += 1
+
+                    logger.log(f"🔗 Merged: {episode_key} ({current_episode_global}/{total_episodes_all_seasons})", "info")
+
+                    # Update progress
+                    active_downloads[session_id]['current'] = current_episode_global
+                    socketio.emit('progress', {
+                        'session_id': session_id,
+                        'current': current_episode_global,
+                        'total': total_episodes_all_seasons,
+                        'episode': f"{episode_key} (merged)"
+                    })
+
+                    try:
+                        extractor = HLSExtractor()
+                        result = await process_single_episode(extractor, episode_url, args, "", logger)
+
+                        if result:
+                            total_successful += 1
+                            queue_manager.update_progress(session_id, completed=total_successful)
+                            queue_manager.update_episode_status(session_id, episode_key, 'completed', 100)
+
+                            socketio.emit('progress', {
+                                'session_id': session_id,
+                                'current': total_successful,
+                                'total': total_episodes_all_seasons,
+                                'episode': f"{episode_key} ✓",
+                                'completed': total_successful
+                            })
+                        else:
+                            total_failed += 1
+                            all_failed_episodes.append(episode_key)
+                            queue_manager.update_episode_status(session_id, episode_key, 'failed', 0)
+                            logger.log(f"❌ {episode_key} - Failed", "error")
+
+                    except Exception as e:
+                        total_failed += 1
+                        all_failed_episodes.append(episode_key)
+                        queue_manager.update_episode_status(session_id, episode_key, 'failed', 0)
+                        logger.log(f"❌ {episode_key} - Error: {str(e)}", "error")
+
+            # Update failed episodes
+            active_downloads[session_id]['failed_episodes'] = all_failed_episodes
+            queue_manager.update_progress(session_id, completed=total_successful, failed_episodes=all_failed_episodes)
+
         # Final status for all seasons and extras
         if session_id in active_downloads and active_downloads[session_id]['status'] != 'cancelled':
             active_downloads[session_id]['status'] = 'completed'
@@ -2604,6 +2662,35 @@ async def process_download_async(session_id, url, options):
                 completed=total_successful,
                 failed_episodes=all_failed_episodes
             )
+
+            # If this is a retry, update the original item's stats
+            if '_retry_' in session_id:
+                original_session_id = session_id.split('_retry_')[0]
+                original_item = queue_manager.get_item(original_session_id)
+                if original_item:
+                    # Get successfully retried episodes (those we downloaded minus those that failed again)
+                    successful_retries = []
+                    for season_num in episodes_per_season:
+                        for ep_num in episodes_per_season.get(season_num, []):
+                            ep_key = f"S{season_num:02d}E{ep_num:02d}"
+                            if ep_key not in all_failed_episodes:
+                                successful_retries.append(ep_key)
+
+                    if successful_retries:
+                        # Remove successful retries from original's failed_episodes
+                        updated_failed = [ep for ep in original_item.failed_episodes if ep not in successful_retries]
+                        # Update original's completed count
+                        new_completed = original_item.completed_episodes + len(successful_retries)
+                        queue_manager.update_progress(
+                            original_session_id,
+                            completed=new_completed,
+                            failed_episodes=updated_failed
+                        )
+                        logger.log(f"✅ Updated original item: +{len(successful_retries)} completed, {len(updated_failed)} still failed", "info")
+
+                        # Remove retry item from queue (merged into original)
+                        queue_manager.remove_item(session_id)
+                        logger.log(f"🗑️ Removed retry item (merged into original)", "info")
 
     except Exception as e:
         active_downloads[session_id]['status'] = 'error'
@@ -3974,6 +4061,24 @@ def cancel_queued_download(session_id):
         if session_id in active_downloads:
             active_downloads[session_id]['status'] = 'cancelled'
         return jsonify({'status': 'cancelled'})
+
+    return jsonify({'error': 'Session not found'}), 404
+
+
+@app.route('/api/queue/<session_id>/remove', methods=['DELETE'])
+def remove_queue_item(session_id):
+    """Completely remove a queue item (for completed/failed/cancelled items)"""
+    # First cancel if still active
+    if session_id in active_downloads:
+        active_downloads[session_id]['status'] = 'cancelled'
+        del active_downloads[session_id]
+
+    # Remove from queue
+    success = queue_manager.remove_item(session_id)
+
+    if success:
+        print(f"🗑️ Removed queue item: {session_id[:8]}...")
+        return jsonify({'status': 'removed', 'session_id': session_id})
 
     return jsonify({'error': 'Session not found'}), 404
 
