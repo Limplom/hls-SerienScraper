@@ -193,6 +193,74 @@
                     </div>
                 </section>
 
+                <!-- Cache Settings Section -->
+                <section class="settings-card">
+                    <h2 class="section-title">💾 Cache Settings</h2>
+
+                    <div class="setting-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="cache_enabled" name="cache.enabled" {% if settings.cache.enabled %}checked{% endif %}>
+                            <span>Enable Caching</span>
+                            <span class="setting-description">Cache series metadata, cover images, and HTTP responses</span>
+                        </label>
+                    </div>
+
+                    <div class="setting-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="cache_cover_images" name="cache.cache_cover_images" {% if settings.cache.cache_cover_images %}checked{% endif %}>
+                            <span>Cache Cover Images</span>
+                            <span class="setting-description">Store cover images locally to reduce network requests</span>
+                        </label>
+                    </div>
+
+                    <div class="setting-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="cache_episodes" name="cache.cache_episodes" {% if settings.cache.cache_episodes %}checked{% endif %}>
+                            <span>Cache Episode Metadata</span>
+                            <span class="setting-description">Cache individual episode information</span>
+                        </label>
+                    </div>
+
+                    <div class="setting-group">
+                        <label for="hot_cache_size" class="setting-label">
+                            Hot Cache Size
+                            <span class="setting-description">In-memory cache for frequently accessed items (10-500)</span>
+                        </label>
+                        <div class="slider-container">
+                            <input type="range" id="hot_cache_size" name="cache.hot_cache_size"
+                                   min="10" max="500" step="10" value="{{ settings.cache.hot_cache_size }}"
+                                   oninput="document.getElementById('hotCacheValue').textContent = this.value">
+                            <span id="hotCacheValue" class="slider-value">{{ settings.cache.hot_cache_size }}</span>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <label for="ttl_metadata_days" class="setting-label">
+                            Metadata Cache TTL (days)
+                            <span class="setting-description">How long to keep series metadata (1-90)</span>
+                        </label>
+                        <div class="slider-container">
+                            <input type="range" id="ttl_metadata_days" name="cache.ttl_metadata_days"
+                                   min="1" max="90" value="{{ settings.cache.ttl_metadata_days }}"
+                                   oninput="document.getElementById('metadataTTLValue').textContent = this.value + ' days'">
+                            <span id="metadataTTLValue" class="slider-value">{{ settings.cache.ttl_metadata_days }} days</span>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <label for="ttl_cover_images_days" class="setting-label">
+                            Cover Images Cache TTL (days)
+                            <span class="setting-description">How long to keep cover images (1-365)</span>
+                        </label>
+                        <div class="slider-container">
+                            <input type="range" id="ttl_cover_images_days" name="cache.ttl_cover_images_days"
+                                   min="1" max="365" step="5" value="{{ settings.cache.ttl_cover_images_days }}"
+                                   oninput="document.getElementById('coverTTLValue').textContent = this.value + ' days'">
+                            <span id="coverTTLValue" class="slider-value">{{ settings.cache.ttl_cover_images_days }} days</span>
+                        </div>
+                    </div>
+                </section>
+
                 <!-- Action Buttons -->
                 <div class="settings-actions">
                     <button type="button" class="btn-primary" onclick="saveSettings()">

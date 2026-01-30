@@ -47,6 +47,16 @@ def settings_page():
             'scrape_interval_seconds': current_settings.get('auto_scraper', {}).get('scrape_interval_seconds', 25),
             'batch_size': current_settings.get('auto_scraper', {}).get('batch_size', 10),
             'min_idle_between_scrapes': current_settings.get('auto_scraper', {}).get('min_idle_between_scrapes', 5)
+        },
+        'cache': {
+            'enabled': current_settings.get('cache', {}).get('enabled', True),
+            'cache_dir': current_settings.get('cache', {}).get('cache_dir', './cache'),
+            'cache_cover_images': current_settings.get('cache', {}).get('cache_cover_images', True),
+            'cache_episodes': current_settings.get('cache', {}).get('cache_episodes', True),
+            'hot_cache_size': current_settings.get('cache', {}).get('hot_cache_size', 100),
+            'ttl_metadata_days': current_settings.get('cache', {}).get('ttl_metadata_days', 7),
+            'ttl_episodes_days': current_settings.get('cache', {}).get('ttl_episodes_days', 30),
+            'ttl_cover_images_days': current_settings.get('cache', {}).get('ttl_cover_images_days', 90)
         }
     }
 
@@ -116,6 +126,16 @@ def reset_settings():
                 "scrape_interval_seconds": 25,
                 "batch_size": 10,
                 "min_idle_between_scrapes": 5
+            },
+            "cache": {
+                "enabled": True,
+                "cache_dir": "./cache",
+                "cache_cover_images": True,
+                "cache_episodes": True,
+                "hot_cache_size": 100,
+                "ttl_metadata_days": 7,
+                "ttl_episodes_days": 30,
+                "ttl_cover_images_days": 90
             }
         }
 

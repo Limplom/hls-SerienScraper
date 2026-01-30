@@ -21,7 +21,8 @@ function collectFormData() {
     const form = document.getElementById('settingsForm');
     const formData = new FormData(form);
     const settings = {
-        auto_scraper: {}
+        auto_scraper: {},
+        cache: {}
     };
 
     for (const [key, value] of formData.entries()) {
@@ -33,9 +34,17 @@ function collectFormData() {
             } else {
                 settings.auto_scraper[subKey] = isNaN(value) ? value : Number(value);
             }
+        } else if (key.startsWith('cache.')) {
+            const subKey = key.replace('cache.', '');
+            // Handle boolean checkboxes
+            if (subKey === 'enabled' || subKey === 'cache_cover_images' || subKey === 'cache_episodes') {
+                settings.cache[subKey] = true;
+            } else {
+                settings.cache[subKey] = isNaN(value) ? value : Number(value);
+            }
         } else {
             // Handle top-level settings
-            if (key === 'audio_only' || key === 'browser_headless') {
+            if (key === 'audio_only' || key === 'browser_headless' || key === 'verify_downloads') {
                 settings[key] = true;
             } else {
                 settings[key] = isNaN(value) ? value : Number(value);
@@ -44,13 +53,24 @@ function collectFormData() {
     }
 
     // Handle unchecked checkboxes (they don't appear in FormData)
-    const checkboxes = ['audio_only', 'browser_headless', 'auto_scraper.enabled'];
+    const checkboxes = [
+        'audio_only',
+        'browser_headless',
+        'verify_downloads',
+        'auto_scraper.enabled',
+        'cache.enabled',
+        'cache.cache_cover_images',
+        'cache.cache_episodes'
+    ];
     checkboxes.forEach(name => {
         const checkbox = form.querySelector(`[name="${name}"]`);
         if (checkbox && checkbox.type === 'checkbox' && !checkbox.checked) {
             if (name.startsWith('auto_scraper.')) {
                 const subKey = name.replace('auto_scraper.', '');
                 settings.auto_scraper[subKey] = false;
+            } else if (name.startsWith('cache.')) {
+                const subKey = name.replace('cache.', '');
+                settings.cache[subKey] = false;
             } else {
                 settings[name] = false;
             }
