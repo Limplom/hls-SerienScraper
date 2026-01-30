@@ -1186,17 +1186,36 @@ class BackgroundAutoScraper:
 
                         result.extraTabs = [...new Set(extraTabs)];
 
-                        const coverImg = document.querySelector('.seriesCoverBox img');
-                        if (coverImg) result.cover = coverImg.getAttribute('data-src') || coverImg.getAttribute('src');
+                        // Get cover image - try new structure first, fallback to old
+                        let coverImg = document.querySelector('picture img.img-fluid.w-100.loaded[alt]');
+                        if (!coverImg || coverImg.getAttribute('src')?.includes('base64')) {
+                            // Try to find img with data-src attribute containing '/channel/'
+                            const allImgs = document.querySelectorAll('picture img[data-src*="/channel/"]');
+                            if (allImgs.length > 0) coverImg = allImgs[0];
+                        }
+                        if (!coverImg) {
+                            // Fallback to old selector
+                            coverImg = document.querySelector('.seriesCoverBox img');
+                        }
+                        if (coverImg) {
+                            result.cover = coverImg.getAttribute('data-src') || coverImg.getAttribute('src');
+                        }
 
-                        const descElem = document.querySelector('p.seri_des[data-full-description]');
+                        // Get description - try new structure first, fallback to old
+                        let descElem = document.querySelector('span.description-text');
                         if (descElem) {
-                            let desc = descElem.getAttribute('data-full-description');
-                            if (desc && desc.startsWith('[')) {
-                                const bracketEnd = desc.indexOf(']');
-                                if (bracketEnd !== -1) desc = desc.substring(bracketEnd + 1).trim();
+                            result.description = descElem.textContent.trim();
+                        } else {
+                            // Fallback to old selector
+                            descElem = document.querySelector('p.seri_des[data-full-description]');
+                            if (descElem) {
+                                let desc = descElem.getAttribute('data-full-description');
+                                if (desc && desc.startsWith('[')) {
+                                    const bracketEnd = desc.indexOf(']');
+                                    if (bracketEnd !== -1) desc = desc.substring(bracketEnd + 1).trim();
+                                }
+                                result.description = desc;
                             }
-                            result.description = desc;
                         }
 
                         // Check endDate - if not "Heute", series is completed
@@ -3199,24 +3218,39 @@ def parse_url():
 
                             data.extraTabs = [...new Set(extraTabs)];
 
-                            // Get cover image
-                            const coverImg = document.querySelector('.seriesCoverBox img');
+                            // Get cover image - try new structure first, fallback to old
+                            let coverImg = document.querySelector('picture img.img-fluid.w-100.loaded[alt]');
+                            if (!coverImg || (coverImg.getAttribute('src') && coverImg.getAttribute('src').includes('base64'))) {
+                                // Try to find img with data-src attribute containing '/channel/'
+                                const allImgs = document.querySelectorAll('picture img[data-src*="/channel/"]');
+                                if (allImgs.length > 0) coverImg = allImgs[0];
+                            }
+                            if (!coverImg) {
+                                // Fallback to old selector
+                                coverImg = document.querySelector('.seriesCoverBox img');
+                            }
                             if (coverImg) {
                                 data.cover = coverImg.getAttribute('data-src') || coverImg.getAttribute('src');
                             }
 
-                            // Get description
-                            const descElem = document.querySelector('p.seri_des[data-full-description]');
+                            // Get description - try new structure first, fallback to old
+                            let descElem = document.querySelector('span.description-text');
                             if (descElem) {
-                                let desc = descElem.getAttribute('data-full-description');
-                                // Remove series name prefix [Name]
-                                if (desc && desc.startsWith('[')) {
-                                    const bracketEnd = desc.indexOf(']');
-                                    if (bracketEnd !== -1) {
-                                        desc = desc.substring(bracketEnd + 1).trim();
+                                data.description = descElem.textContent.trim();
+                            } else {
+                                // Fallback to old selector
+                                descElem = document.querySelector('p.seri_des[data-full-description]');
+                                if (descElem) {
+                                    let desc = descElem.getAttribute('data-full-description');
+                                    // Remove series name prefix [Name]
+                                    if (desc && desc.startsWith('[')) {
+                                        const bracketEnd = desc.indexOf(']');
+                                        if (bracketEnd !== -1) {
+                                            desc = desc.substring(bracketEnd + 1).trim();
+                                        }
                                     }
+                                    data.description = desc;
                                 }
-                                data.description = desc;
                             }
 
                             // Extract available languages from changeLanguageBox - DYNAMIC detection

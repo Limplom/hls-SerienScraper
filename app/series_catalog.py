@@ -7,12 +7,20 @@ Optimized with parallel scraping for faster catalog updates.
 
 import json
 import os
+import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 from playwright.async_api import async_playwright
 import re
 import asyncio
+
+# Fix Windows console encoding for emojis
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except:
+        pass
 
 from app.config import Config
 
@@ -77,7 +85,8 @@ async def scrape_catalog(source='series', max_workers=3) -> Dict:
     print(f"🔍 Scraping {src_config['name']} catalog from {base_url}{catalog_path}...")
     print(f"⚡ Using {max_workers} parallel workers for faster processing")
 
-    catalog_url = f"{base_url}{catalog_path}"
+    # Use genre sorting parameter to get old structure
+    catalog_url = f"{base_url}{catalog_path}?by=genre"
 
     async with async_playwright() as p:
         # Use headless mode for better performance
@@ -88,7 +97,8 @@ async def scrape_catalog(source='series', max_workers=3) -> Dict:
                 '--disable-blink-features=AutomationControlled',
                 '--mute-audio',
                 '--disable-gpu',
-                '--disable-dev-shm-usage'
+                '--disable-dev-shm-usage',
+                '--ignore-certificate-errors'
             ]
         )
 
@@ -96,6 +106,7 @@ async def scrape_catalog(source='series', max_workers=3) -> Dict:
             # Step 1: Get HTML structure with single page
             print("📄 Fetching page HTML...")
             context = await browser.new_context(
+                ignore_https_errors=True,
                 viewport={'width': 1920, 'height': 1080},
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             )
@@ -103,42 +114,48 @@ async def scrape_catalog(source='series', max_workers=3) -> Dict:
             page.set_default_timeout(30000)
 
             await page.goto(catalog_url, wait_until='domcontentloaded', timeout=30000)
-            await page.wait_for_selector('div.genre', timeout=10000)
+
+            # Wait for the series list to load (works for both genre and alphabetic views)
+            await page.wait_for_selector('ul.series-list', timeout=10000)
+            print("✅ Page loaded successfully")
 
             # Get HTML for parallel processing
             html_content = await page.content()
             await context.close()
 
-            # Step 2: Extract genre data using JavaScript evaluation (faster than querying)
-            print("🔬 Extracting genre structure...")
+            # Step 2: Extract data using JavaScript evaluation (faster than querying)
+            # The new structure uses h3.h5 headers for both genre and alphabetic views
+            print("🔬 Extracting catalog structure...")
             context2 = await browser.new_context()
             page2 = await context2.new_page()
             await page2.set_content(html_content)
 
-            # Extract all genres and their series in one JavaScript evaluation
+            # Extract using the new unified structure (h3.h5 + ul.series-list)
             genres_raw = await page2.evaluate('''
                 () => {
-                    const genreContainers = document.querySelectorAll('div.genre');
                     const results = [];
+                    const headers = document.querySelectorAll('h3.h5');
 
-                    genreContainers.forEach(container => {
-                        const heading = container.querySelector('.seriesGenreList h3');
-                        if (!heading) return;
+                    headers.forEach(header => {
+                        const categoryName = header.textContent.trim();
 
-                        const genreName = heading.textContent.trim();
-                        const links = container.querySelectorAll('ul li a');
+                        // Find the corresponding series list
+                        const seriesList = header.parentElement.nextElementSibling;
+                        if (!seriesList || !seriesList.classList.contains('series-list')) return;
+
+                        const links = seriesList.querySelectorAll('li.series-item a');
                         const series = [];
 
                         links.forEach(link => {
                             series.push({
                                 name: link.textContent.trim(),
                                 href: link.getAttribute('href'),
-                                alternative_titles: link.getAttribute('data-alternative-title') || ''
+                                alternative_titles: link.parentElement.getAttribute('data-search') || ''
                             });
                         });
 
                         if (series.length > 0) {
-                            results.push({ genre: genreName, series: series });
+                            results.push({ genre: categoryName, series: series });
                         }
                     });
 
@@ -158,8 +175,9 @@ async def scrape_catalog(source='series', max_workers=3) -> Dict:
             # Process all genres in parallel
             async def process_series_item(series_raw):
                 try:
-                    slug_pattern = content_path.replace('/', r'\/')
-                    slug_match = re.search(f'{slug_pattern}([^/\\s]+)', series_raw['href'])
+                    # Extract slug from href (format: /serie/slug or /anime/slug)
+                    # Updated pattern to match both old (/serie/stream/slug) and new (/serie/slug) formats
+                    slug_match = re.search(r'/(?:serie|anime)(?:/stream)?/([^/\s]+)', series_raw['href'])
                     if not slug_match:
                         return None
 
