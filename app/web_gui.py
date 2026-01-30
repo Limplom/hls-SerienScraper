@@ -46,6 +46,7 @@ from app.series_catalog import (
     get_all_sources
 )
 from app.config import Config
+from app.file_verification import FileVerifier, format_duration, format_file_size
 import subprocess
 import re
 import argparse
@@ -97,6 +98,11 @@ else:
     # Local development - allow all origins
     ALLOWED_ORIGINS = "*"
 socketio = SocketIO(app, cors_allowed_origins=ALLOWED_ORIGINS, async_mode='threading')
+
+# Register blueprints
+from app.routes import settings_bp, catalog_bp
+app.register_blueprint(settings_bp)
+app.register_blueprint(catalog_bp)
 
 # Thread-safe wrapper for active_downloads dict
 class ThreadSafeDict:
@@ -1606,6 +1612,33 @@ def download_video_with_progress(m3u8_url, output_path, quality="best", codec="a
         if return_code == 0:
             if logger:
                 logger.log(f"✅ Download complete: {output_path.name}", "success")
+
+            # Verify downloaded file (if enabled in settings)
+            from app.config import _json_settings
+            if _json_settings.get('verify_downloads', True):
+                if logger:
+                    logger.log("🔍 Verifying file integrity...", "info")
+                verifier = FileVerifier()
+                verification = verifier.verify_file(str(output_path))
+
+                if verification.is_valid:
+                    if logger:
+                        logger.log(f"✅ File verification passed", "success")
+                        if verification.duration:
+                            logger.log(f"   Duration: {format_duration(verification.duration)}", "info")
+                        if verification.resolution:
+                            logger.log(f"   Resolution: {verification.resolution}", "info")
+                        if verification.video_codec:
+                            logger.log(f"   Video: {verification.video_codec}", "info")
+                        if verification.audio_codec:
+                            logger.log(f"   Audio: {verification.audio_codec}", "info")
+                else:
+                    if logger:
+                        logger.log(f"⚠️ File verification failed: {verification.error}", "warning")
+                        logger.log(f"   File size: {format_file_size(verification.file_size)}", "warning")
+                    # Note: We still return True because the download itself succeeded
+                    # The verification warning is logged for user awareness
+
             return True
         else:
             raise subprocess.CalledProcessError(return_code, command)
@@ -1698,6 +1731,31 @@ def download_video_with_progress(m3u8_url, output_path, quality="best", codec="a
             if return_code == 0:
                 if logger:
                     logger.log(f"✅ Download complete: {output_path.name}", "success")
+
+                # Verify downloaded file (if enabled in settings)
+                from app.config import _json_settings
+                if _json_settings.get('verify_downloads', True):
+                    if logger:
+                        logger.log("🔍 Verifying file integrity...", "info")
+                    verifier = FileVerifier()
+                    verification = verifier.verify_file(str(output_path))
+
+                    if verification.is_valid:
+                        if logger:
+                            logger.log(f"✅ File verification passed", "success")
+                            if verification.duration:
+                                logger.log(f"   Duration: {format_duration(verification.duration)}", "info")
+                            if verification.resolution:
+                                logger.log(f"   Resolution: {verification.resolution}", "info")
+                            if verification.video_codec:
+                                logger.log(f"   Video: {verification.video_codec}", "info")
+                            if verification.audio_codec:
+                                logger.log(f"   Audio: {verification.audio_codec}", "info")
+                    else:
+                        if logger:
+                            logger.log(f"⚠️ File verification failed: {verification.error}", "warning")
+                            logger.log(f"   File size: {format_file_size(verification.file_size)}", "warning")
+
                 return True
             else:
                 if logger:
@@ -2766,176 +2824,6 @@ def index():
         'default_wait_time': app_config.DEFAULT_WAIT_TIME
     }
     return render_template('index.html', config=config_values)
-
-
-@app.route('/settings')
-def settings_page():
-    """Settings configuration page"""
-    from app.config import _json_settings, PROJECT_ROOT
-
-    # Load current settings from JSON file
-    settings_file = PROJECT_ROOT / "config" / "settings.json"
-    if settings_file.exists():
-        try:
-            with open(settings_file, 'r', encoding='utf-8') as f:
-                current_settings = json.load(f)
-        except Exception as e:
-            print(f"⚠️ Error loading settings: {e}")
-            current_settings = {}
-    else:
-        current_settings = {}
-
-    # Provide defaults for any missing values
-    settings_data = {
-        'download_path': current_settings.get('download_path', './Downloads'),
-        'max_parallel_limit': current_settings.get('max_parallel_limit', 25),
-        'max_parallel_downloads': current_settings.get('max_parallel_downloads', 10),
-        'default_format': current_settings.get('default_format', 'mkv'),
-        'default_quality': current_settings.get('default_quality', '1080p'),
-        'default_wait_time': current_settings.get('default_wait_time', 45),
-        'audio_only': current_settings.get('audio_only', False),
-        'browser_max_context_uses': current_settings.get('browser_max_context_uses', 75),
-        'browser_headless': current_settings.get('browser_headless', True),
-        'auto_scraper': {
-            'enabled': current_settings.get('auto_scraper', {}).get('enabled', True),
-            'idle_threshold_seconds': current_settings.get('auto_scraper', {}).get('idle_threshold_seconds', 30),
-            'scrape_interval_seconds': current_settings.get('auto_scraper', {}).get('scrape_interval_seconds', 25),
-            'batch_size': current_settings.get('auto_scraper', {}).get('batch_size', 10),
-            'min_idle_between_scrapes': current_settings.get('auto_scraper', {}).get('min_idle_between_scrapes', 5)
-        }
-    }
-
-    return render_template('settings.html', settings=settings_data)
-
-
-@app.route('/api/settings/save', methods=['POST'])
-def save_settings():
-    """Save settings to config/settings.json"""
-    try:
-        from app.config import PROJECT_ROOT
-
-        new_settings = request.json
-
-        # Validate settings
-        if 'max_parallel_downloads' in new_settings:
-            max_val = new_settings.get('max_parallel_limit', 25)
-            if not (1 <= new_settings['max_parallel_downloads'] <= max_val):
-                return jsonify({
-                    'success': False,
-                    'error': f'max_parallel_downloads must be between 1 and {max_val}'
-                }), 400
-
-        # Save to file
-        settings_file = PROJECT_ROOT / "config" / "settings.json"
-        settings_file.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(settings_file, 'w', encoding='utf-8') as f:
-            json.dump(new_settings, f, indent=4, ensure_ascii=False)
-
-        print(f"✅ Settings saved to {settings_file}")
-
-        return jsonify({
-            'success': True,
-            'message': 'Settings saved successfully'
-        })
-
-    except Exception as e:
-        print(f"❌ Error saving settings: {e}")
-        traceback.print_exc()
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-
-@app.route('/api/settings/reset', methods=['POST'])
-def reset_settings():
-    """Reset settings to defaults"""
-    try:
-        from app.config import PROJECT_ROOT
-
-        default_settings = {
-            "download_path": "./Downloads",
-            "max_parallel_limit": 25,
-            "max_parallel_downloads": 10,
-            "default_format": "mkv",
-            "default_quality": "1080p",
-            "default_wait_time": 45,
-            "audio_only": False,
-            "browser_max_context_uses": 75,
-            "browser_headless": True,
-            "auto_scraper": {
-                "enabled": True,
-                "idle_threshold_seconds": 30,
-                "scrape_interval_seconds": 25,
-                "batch_size": 10,
-                "min_idle_between_scrapes": 5
-            }
-        }
-
-        settings_file = PROJECT_ROOT / "config" / "settings.json"
-        settings_file.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(settings_file, 'w', encoding='utf-8') as f:
-            json.dump(default_settings, f, indent=4, ensure_ascii=False)
-
-        print(f"✅ Settings reset to defaults")
-
-        return jsonify({
-            'success': True,
-            'message': 'Settings reset to defaults'
-        })
-
-    except Exception as e:
-        print(f"❌ Error resetting settings: {e}")
-        traceback.print_exc()
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-
-@app.route('/api/settings/test-path', methods=['POST'])
-def test_download_path():
-    """Test if download path is accessible"""
-    try:
-        data = request.json
-        test_path = data.get('path', '')
-
-        if not test_path:
-            return jsonify({
-                'success': False,
-                'error': 'No path provided'
-            }), 400
-
-        # Convert to absolute path if relative
-        if not os.path.isabs(test_path):
-            test_path = str(project_root / test_path)
-
-        # Try to create directory
-        Path(test_path).mkdir(parents=True, exist_ok=True)
-
-        # Test write access
-        test_file = Path(test_path) / '.test_write'
-        try:
-            test_file.write_text('test')
-            test_file.unlink()
-        except Exception as e:
-            return jsonify({
-                'success': False,
-                'error': f'Path exists but is not writable: {e}'
-            }), 400
-
-        return jsonify({
-            'success': True,
-            'message': f'Path is valid and writable: {test_path}'
-        })
-
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
 
 
 @app.route('/api/start', methods=['POST'])
@@ -4800,106 +4688,6 @@ def handle_disconnect():
 # ==========================================
 # Catalog API Endpoints
 # ==========================================
-
-@app.route('/api/catalog/sources', methods=['GET'])
-def get_sources():
-    """Get all available catalog sources"""
-    sources = get_all_sources()
-    return jsonify({'sources': sources})
-
-
-@app.route('/api/catalog', methods=['GET'])
-def get_catalog():
-    """
-    Returns catalog for specified source
-    Query params:
-      - source: 'series' or 'anime' (default: series)
-      - force_refresh: bool (default: false)
-
-    Response:
-    {
-      'source': 'series',
-      'genres': {...},
-      'total_items': 1234,
-      'last_updated': '...',
-      'from_cache': true/false
-    }
-    """
-    source = request.args.get('source', 'series')
-    force_refresh = request.args.get('force_refresh', 'false').lower() == 'true'
-
-    # Try cache first unless force refresh
-    if not force_refresh:
-        cached = load_catalog_cache(source)
-        if cached and not is_catalog_stale(source):
-            print(f"✅ Using cached {source} catalog")
-            return jsonify({**cached, 'from_cache': True})
-
-    # Scrape fresh catalog
-    print(f"🔄 Scraping fresh {source} catalog...")
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        catalog_data = loop.run_until_complete(scrape_catalog(source))
-        loop.close()
-
-        # Save to cache
-        save_catalog_cache(catalog_data, source)
-
-        return jsonify({**catalog_data, 'from_cache': False})
-
-    except Exception as e:
-        print(f"❌ Error scraping {source} catalog: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/catalog/search', methods=['GET'])
-def search_catalog():
-    """
-    Search content by name, alternative title, or genre
-    Query params:
-      - source: 'series' or 'anime' (default: series)
-      - q: search query
-      - genre: filter by genre (optional)
-
-    Response:
-    {
-      'results': [
-        {'name': '...', 'slug': '...', 'genre': '...', 'url': '...', 'source': '...'},
-        ...
-      ],
-      'total': 42
-    }
-    """
-    source = request.args.get('source', 'series')
-    query = request.args.get('q', '').lower().strip()
-    genre_filter = request.args.get('genre', None)
-
-    catalog = load_catalog_cache(source)
-    if not catalog:
-        return jsonify({'error': f'{source.capitalize()} catalog not loaded. Call /api/catalog?source={source} first.'}), 404
-
-    # Search logic: match name or alternative_titles
-    results = []
-    for genre, series_list in catalog['genres'].items():
-        if genre_filter and genre != genre_filter:
-            continue
-
-        for series in series_list:
-            if (query in series['name'].lower() or
-                query in series.get('alternative_titles', '').lower()):
-                results.append({**series, 'genre': genre})
-
-    return jsonify({'results': results, 'total': len(results)})
-
-
-@app.route('/api/catalog/stats', methods=['GET'])
-def get_catalog_stats_route():
-    """Get catalog statistics for a source"""
-    source = request.args.get('source', 'series')
-    stats = get_catalog_stats(source)
-    return jsonify(stats)
-
 
 if __name__ == '__main__':
     print("=" * 70)

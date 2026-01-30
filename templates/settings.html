@@ -92,6 +92,14 @@
                             <span class="setting-description">Extract only audio tracks (no video)</span>
                         </label>
                     </div>
+
+                    <div class="setting-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="verify_downloads" name="verify_downloads" {% if settings.verify_downloads %}checked{% endif %}>
+                            <span>Verify Downloaded Files</span>
+                            <span class="setting-description">Check file integrity after download (duration, codecs, resolution)</span>
+                        </label>
+                    </div>
                 </section>
 
                 <!-- Browser Settings Section -->
