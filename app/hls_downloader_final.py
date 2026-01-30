@@ -20,6 +20,13 @@ import logging
 from typing import Optional, List, Dict, Any, Tuple, Set
 from concurrent.futures import ThreadPoolExecutor
 
+# Fix Windows console encoding for special characters
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except:
+        pass
+
 # Import config for browser settings
 try:
     from app import config as app_config
@@ -78,30 +85,42 @@ class HLSExtractor:
         """Lädt Brave-kompatible Filterlisten"""
         filter_cache = Path("./filter_cache")
         filter_cache.mkdir(exist_ok=True)
-        
+
+        # Multiple URLs for redundancy (primary and fallback)
         filter_lists = {
-            'easylist': 'https://easylist.to/easylist/easylist.txt',
-            'easyprivacy': 'https://easylist.to/easylist/easyprivacy.txt',
+            'easylist': [
+                'https://easylist-downloads.adblockplus.org/easylist.txt',
+                'https://easylist.to/easylist/easylist.txt'
+            ],
+            'easyprivacy': [
+                'https://easylist-downloads.adblockplus.org/easyprivacy.txt',
+                'https://easylist.to/easylist/easyprivacy.txt'
+            ],
         }
-        
-        for name, url in filter_lists.items():
+
+        for name, urls in filter_lists.items():
             cache_file = filter_cache / f"{name}.txt"
-            
+
             should_download = False
             if not cache_file.exists():
                 should_download = True
             else:
                 file_age = time.time() - cache_file.stat().st_mtime
-                if file_age > 604800:
+                if file_age > 604800:  # 7 days
                     should_download = True
-            
+
             if should_download:
-                try:
-                    print(f"Downloading {name} filter list...")
-                    urllib.request.urlretrieve(url, cache_file)
-                    print(f"✓ Downloaded {name}")
-                except Exception as e:
-                    print(f"⚠ Could not download {name}: {e}")
+                downloaded = False
+                for url in urls:
+                    try:
+                        urllib.request.urlretrieve(url, cache_file)
+                        downloaded = True
+                        break
+                    except Exception:
+                        continue
+
+                if not downloaded:
+                    # Silently skip if all downloads failed and no cache exists
                     if not cache_file.exists():
                         continue
             
