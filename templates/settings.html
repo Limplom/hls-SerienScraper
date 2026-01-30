@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - HLS Video Downloader</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="settings-header">
+                <h1>⚙️ Settings</h1>
+                <a href="/" class="btn-back">← Back to Downloads</a>
+            </div>
+            <p class="subtitle">Configure your HLS Video Downloader</p>
+        </header>
+
+        <main>
+            <!-- Save notification -->
+            <div id="saveNotification" class="notification" style="display: none;"></div>
+
+            <form id="settingsForm">
+                <!-- Download Settings Section -->
+                <section class="settings-card">
+                    <h2 class="section-title">📥 Download Settings</h2>
+
+                    <div class="setting-group">
+                        <label for="download_path" class="setting-label">
+                            Download Path
+                            <span class="setting-description">Where downloaded files will be saved</span>
+                        </label>
+                        <input type="text" id="download_path" name="download_path" class="setting-input" value="{{ settings.download_path }}">
+                    </div>
+
+                    <div class="setting-group">
+                        <label for="max_parallel_downloads" class="setting-label">
+                            Max Parallel Downloads
+                            <span class="setting-description">Number of episodes downloaded simultaneously (1-{{ settings.max_parallel_limit }})</span>
+                        </label>
+                        <div class="slider-container">
+                            <input type="range" id="max_parallel_downloads" name="max_parallel_downloads"
+                                   min="1" max="{{ settings.max_parallel_limit }}" value="{{ settings.max_parallel_downloads }}"
+                                   oninput="document.getElementById('maxParallelValue').textContent = this.value">
+                            <span id="maxParallelValue" class="slider-value">{{ settings.max_parallel_downloads }}</span>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <label for="default_format" class="setting-label">
+                            Default Video Format
+                            <span class="setting-description">Preferred video container format</span>
+                        </label>
+                        <select id="default_format" name="default_format" class="setting-select">
+                            <option value="mkv" {% if settings.default_format == 'mkv' %}selected{% endif %}>MKV</option>
+                            <option value="mp4" {% if settings.default_format == 'mp4' %}selected{% endif %}>MP4</option>
+                            <option value="avi" {% if settings.default_format == 'avi' %}selected{% endif %}>AVI</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-group">
+                        <label for="default_quality" class="setting-label">
+                            Default Quality
+                            <span class="setting-description">Preferred video quality</span>
+                        </label>
+                        <select id="default_quality" name="default_quality" class="setting-select">
+                            <option value="best" {% if settings.default_quality == 'best' %}selected{% endif %}>Best</option>
+                            <option value="1080p" {% if settings.default_quality == '1080p' %}selected{% endif %}>1080p</option>
+                            <option value="720p" {% if settings.default_quality == '720p' %}selected{% endif %}>720p</option>
+                            <option value="480p" {% if settings.default_quality == '480p' %}selected{% endif %}>480p</option>
+                        </select>
+                    </div>
+
+                    <div class="setting-group">
+                        <label for="default_wait_time" class="setting-label">
+                            Browser Wait Time (seconds)
+                            <span class="setting-description">How long to wait for page to load (30-120)</span>
+                        </label>
+                        <div class="slider-container">
+                            <input type="range" id="default_wait_time" name="default_wait_time"
+                                   min="30" max="120" step="5" value="{{ settings.default_wait_time }}"
+                                   oninput="document.getElementById('waitTimeValue').textContent = this.value + 's'">
+                            <span id="waitTimeValue" class="slider-value">{{ settings.default_wait_time }}s</span>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="audio_only" name="audio_only" {% if settings.audio_only %}checked{% endif %}>
+                            <span>Audio Only Mode</span>
+                            <span class="setting-description">Extract only audio tracks (no video)</span>
+                        </label>
+                    </div>
+                </section>
+
+                <!-- Browser Settings Section -->
+                <section class="settings-card">
+                    <h2 class="section-title">🌐 Browser Settings</h2>
+
+                    <div class="setting-group">
+                        <label for="browser_max_context_uses" class="setting-label">
+                            Browser Context Recycle Limit
+                            <span class="setting-description">Recycle browser after N uses (50-200)</span>
+                        </label>
+                        <div class="slider-container">
+                            <input type="range" id="browser_max_context_uses" name="browser_max_context_uses"
+                                   min="50" max="200" step="5" value="{{ settings.browser_max_context_uses }}"
+                                   oninput="document.getElementById('contextValue').textContent = this.value">
+                            <span id="contextValue" class="slider-value">{{ settings.browser_max_context_uses }}</span>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="browser_headless" name="browser_headless" {% if settings.browser_headless %}checked{% endif %}>
+                            <span>Headless Mode</span>
+                            <span class="setting-description">Run browser completely invisible (faster, but may be detected)</span>
+                        </label>
+                    </div>
+                </section>
+
+                <!-- Auto-Scraper Settings Section -->
+                <section class="settings-card">
+                    <h2 class="section-title">🤖 Auto-Scraper Settings</h2>
+
+                    <div class="setting-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="auto_scraper_enabled" name="auto_scraper.enabled" {% if settings.auto_scraper.enabled %}checked{% endif %}>
+                            <span>Enable Auto-Scraper</span>
+                            <span class="setting-description">Automatically update series metadata when idle</span>
+                        </label>
+                    </div>
+
+                    <div class="setting-group">
+                        <label for="auto_scraper_idle_threshold" class="setting-label">
+                            Idle Threshold (seconds)
+                            <span class="setting-description">Wait time before starting auto-scraper (10-300)</span>
+                        </label>
+                        <div class="slider-container">
+                            <input type="range" id="auto_scraper_idle_threshold" name="auto_scraper.idle_threshold_seconds"
+                                   min="10" max="300" step="10" value="{{ settings.auto_scraper.idle_threshold_seconds }}"
+                                   oninput="document.getElementById('idleValue').textContent = this.value + 's'">
+                            <span id="idleValue" class="slider-value">{{ settings.auto_scraper.idle_threshold_seconds }}s</span>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <label for="auto_scraper_interval" class="setting-label">
+                            Scrape Interval (seconds)
+                            <span class="setting-description">Time between scrape operations (10-300)</span>
+                        </label>
+                        <div class="slider-container">
+                            <input type="range" id="auto_scraper_interval" name="auto_scraper.scrape_interval_seconds"
+                                   min="10" max="300" step="5" value="{{ settings.auto_scraper.scrape_interval_seconds }}"
+                                   oninput="document.getElementById('intervalValue').textContent = this.value + 's'">
+                            <span id="intervalValue" class="slider-value">{{ settings.auto_scraper.scrape_interval_seconds }}s</span>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <label for="auto_scraper_batch_size" class="setting-label">
+                            Batch Size
+                            <span class="setting-description">Number of series to scrape at once (1-20)</span>
+                        </label>
+                        <div class="slider-container">
+                            <input type="range" id="auto_scraper_batch_size" name="auto_scraper.batch_size"
+                                   min="1" max="20" value="{{ settings.auto_scraper.batch_size }}"
+                                   oninput="document.getElementById('batchValue').textContent = this.value">
+                            <span id="batchValue" class="slider-value">{{ settings.auto_scraper.batch_size }}</span>
+                        </div>
+                    </div>
+
+                    <div class="setting-group">
+                        <label for="auto_scraper_min_idle" class="setting-label">
+                            Min Idle Between Scrapes (seconds)
+                            <span class="setting-description">Minimum wait time between operations (1-60)</span>
+                        </label>
+                        <div class="slider-container">
+                            <input type="range" id="auto_scraper_min_idle" name="auto_scraper.min_idle_between_scrapes"
+                                   min="1" max="60" value="{{ settings.auto_scraper.min_idle_between_scrapes }}"
+                                   oninput="document.getElementById('minIdleValue').textContent = this.value + 's'">
+                            <span id="minIdleValue" class="slider-value">{{ settings.auto_scraper.min_idle_between_scrapes }}s</span>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Action Buttons -->
+                <div class="settings-actions">
+                    <button type="button" class="btn-primary" onclick="saveSettings()">
+                        💾 Save Settings
+                    </button>
+                    <button type="button" class="btn-secondary" onclick="resetToDefaults()">
+                        🔄 Reset to Defaults
+                    </button>
+                    <button type="button" class="btn-secondary" onclick="exportSettings()">
+                        📤 Export Settings
+                    </button>
+                    <button type="button" class="btn-secondary" onclick="testDownloadPath()">
+                        🧪 Test Download Path
+                    </button>
+                </div>
+
+                <div class="restart-notice" id="restartNotice" style="display: none;">
+                    ⚠️ Some settings require an application restart to take effect.
+                </div>
+            </form>
+        </main>
+
+        <footer class="settings-footer">
+            <p>Settings are saved to <code>config/settings.json</code></p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/settings.js') }}"></script>
+</body>
+</html>

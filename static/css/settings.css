@@ -1,0 +1,311 @@
+/* Settings Page Styling */
+
+.settings-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 1rem;
+}
+
+.btn-back {
+    padding: 0.5rem 1rem;
+    background: var(--card-bg, #2a2a2a);
+    color: var(--text-color, #e0e0e0);
+    text-decoration: none;
+    border-radius: 6px;
+    border: 1px solid var(--border-color, #444);
+    font-size: 0.9rem;
+    transition: all 0.2s;
+}
+
+.btn-back:hover {
+    background: var(--hover-bg, #333);
+    border-color: var(--primary-color, #4a9eff);
+}
+
+.settings-card {
+    background: var(--card-bg, #2a2a2a);
+    border-radius: 12px;
+    padding: 2rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.section-title {
+    font-size: 1.4rem;
+    margin-bottom: 1.5rem;
+    color: var(--primary-color, #4a9eff);
+    border-bottom: 2px solid var(--border-color, #444);
+    padding-bottom: 0.5rem;
+}
+
+.setting-group {
+    margin-bottom: 1.5rem;
+}
+
+.setting-label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: var(--text-color, #e0e0e0);
+}
+
+.setting-description {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 400;
+    color: var(--text-secondary, #999);
+    margin-top: 0.25rem;
+}
+
+.setting-input,
+.setting-select {
+    width: 100%;
+    padding: 0.75rem;
+    background: var(--input-bg, #1a1a1a);
+    border: 1px solid var(--border-color, #444);
+    border-radius: 6px;
+    color: var(--text-color, #e0e0e0);
+    font-size: 1rem;
+    transition: border-color 0.2s;
+}
+
+.setting-input:focus,
+.setting-select:focus {
+    outline: none;
+    border-color: var(--primary-color, #4a9eff);
+}
+
+.slider-container {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.slider-container input[type="range"] {
+    flex: 1;
+    height: 6px;
+    background: var(--border-color, #444);
+    border-radius: 3px;
+    outline: none;
+    -webkit-appearance: none;
+}
+
+.slider-container input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    background: var(--primary-color, #4a9eff);
+    border-radius: 50%;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.slider-container input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+    background: var(--primary-hover, #6bb4ff);
+}
+
+.slider-container input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    background: var(--primary-color, #4a9eff);
+    border-radius: 50%;
+    cursor: pointer;
+    border: none;
+    transition: all 0.2s;
+}
+
+.slider-container input[type="range"]::-moz-range-thumb:hover {
+    transform: scale(1.2);
+    background: var(--primary-hover, #6bb4ff);
+}
+
+.slider-value {
+    min-width: 3.5rem;
+    text-align: right;
+    font-weight: 600;
+    color: var(--primary-color, #4a9eff);
+}
+
+.checkbox-label {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    cursor: pointer;
+    padding: 0.75rem;
+    background: var(--input-bg, #1a1a1a);
+    border: 1px solid var(--border-color, #444);
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.checkbox-label:hover {
+    border-color: var(--primary-color, #4a9eff);
+    background: var(--hover-bg, #222);
+}
+
+.checkbox-label input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+    accent-color: var(--primary-color, #4a9eff);
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.checkbox-label span:first-of-type {
+    font-weight: 600;
+    flex: 1;
+}
+
+.settings-actions {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-top: 2rem;
+    padding-top: 2rem;
+    border-top: 2px solid var(--border-color, #444);
+}
+
+.btn-primary,
+.btn-secondary {
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    flex: 1;
+    min-width: 150px;
+}
+
+.btn-primary {
+    background: var(--primary-color, #4a9eff);
+    color: white;
+}
+
+.btn-primary:hover {
+    background: var(--primary-hover, #6bb4ff);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(74, 158, 255, 0.4);
+}
+
+.btn-secondary {
+    background: var(--card-bg, #2a2a2a);
+    color: var(--text-color, #e0e0e0);
+    border: 1px solid var(--border-color, #444);
+}
+
+.btn-secondary:hover {
+    background: var(--hover-bg, #333);
+    border-color: var(--primary-color, #4a9eff);
+}
+
+.notification {
+    padding: 1rem 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+    font-weight: 500;
+    animation: slideDown 0.3s ease;
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.notification.success {
+    background: rgba(46, 204, 113, 0.2);
+    border: 1px solid #2ecc71;
+    color: #2ecc71;
+}
+
+.notification.error {
+    background: rgba(231, 76, 60, 0.2);
+    border: 1px solid #e74c3c;
+    color: #e74c3c;
+}
+
+.notification.warning {
+    background: rgba(241, 196, 15, 0.2);
+    border: 1px solid #f1c40f;
+    color: #f1c40f;
+}
+
+.restart-notice {
+    background: rgba(241, 196, 15, 0.1);
+    border: 1px solid #f1c40f;
+    color: #f1c40f;
+    padding: 1rem 1.5rem;
+    border-radius: 8px;
+    margin-top: 1.5rem;
+    text-align: center;
+    font-weight: 500;
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.8;
+    }
+}
+
+.settings-footer {
+    text-align: center;
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border-color, #444);
+    color: var(--text-secondary, #999);
+    font-size: 0.9rem;
+}
+
+.settings-footer code {
+    background: var(--input-bg, #1a1a1a);
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-family: 'Courier New', monospace;
+    color: var(--primary-color, #4a9eff);
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .settings-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .settings-card {
+        padding: 1.5rem;
+    }
+
+    .settings-actions {
+        flex-direction: column;
+    }
+
+    .btn-primary,
+    .btn-secondary {
+        width: 100%;
+    }
+
+    .slider-container {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .slider-value {
+        text-align: left;
+    }
+}
