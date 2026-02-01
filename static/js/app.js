@@ -2067,9 +2067,6 @@ function renderQueue(queueData) {
     const failedEpisodes = queueData.items.reduce((sum, item) => sum + (item.failed_episodes_count || 0), 0);
 
     // Update overall statistics
-    document.getElementById('totalProgressText').textContent = `${completedEpisodes} / ${totalEpisodes}`;
-    document.getElementById('totalProgressFill').style.width = `${totalProgress}%`;
-    document.getElementById('totalProgressPercent').textContent = `${totalProgress}%`;
     document.getElementById('totalSuccessCount').textContent = completedEpisodes;
     document.getElementById('totalFailedCount').textContent = failedEpisodes;
 
@@ -2566,12 +2563,6 @@ function updateOverallAggregatedProgress() {
     });
 
     if (overallTotal > 0) {
-        // Calculate smooth overall progress
-        const overallProgress = Math.round((overallProgressSum / overallTotal) * 100);
-
-        document.getElementById('totalProgressText').textContent = `${overallCompleted} / ${overallTotal}`;
-        document.getElementById('totalProgressFill').style.width = `${overallProgress}%`;
-        document.getElementById('totalProgressPercent').textContent = `${overallProgress}%`;
         document.getElementById('totalSuccessCount').textContent = overallCompleted;
     }
 }
@@ -2595,12 +2586,6 @@ function updateOverallStatistics() {
         }
     });
 
-    if (totalEpisodes > 0) {
-        const totalProgress = Math.round((completedEpisodes / totalEpisodes) * 100);
-        document.getElementById('totalProgressText').textContent = `${completedEpisodes} / ${totalEpisodes}`;
-        document.getElementById('totalProgressFill').style.width = `${totalProgress}%`;
-        document.getElementById('totalProgressPercent').textContent = `${totalProgress}%`;
-    }
 }
 
 // Retry failed episodes

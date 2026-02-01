@@ -1716,12 +1716,6 @@ footer {
     box-shadow: 0 4px 12px rgba(99, 102, 241, 0.2);
 }
 
-/* TOTAL Block - Special styling with progress bar */
-.download-stat-card.total {
-    border-left: 4px solid var(--primary-color);
-    background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, var(--bg-dark) 50%);
-}
-
 /* SUCCESS Block - Green theme */
 .download-stat-card.success {
     border-left: 4px solid #10b981;

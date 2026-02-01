@@ -2431,7 +2431,10 @@ async def process_download_async(session_id, url, options):
                         builtins.print = custom_print
 
                         try:
-                            result = await process_single_episode(extractor, episode_url, args, "", logger)
+                            # Create episode-specific logger with episode_key for progress tracking
+                            episode_key = f"S{season:02d}E{ep_num:02d}"
+                            episode_logger = WebLogger(session_id, episode_key=episode_key)
+                            result = await process_single_episode(extractor, episode_url, args, "", episode_logger)
                             if result:
                                 successful += 1
                                 total_successful += 1
@@ -2597,7 +2600,9 @@ async def process_download_async(session_id, url, options):
                     builtins.print = custom_print
 
                     try:
-                        result = await process_single_episode(extractor, episode_url, args, "", logger)
+                        # Create episode-specific logger with episode_key for progress tracking
+                        episode_logger = WebLogger(session_id, episode_key=episode_key)
+                        result = await process_single_episode(extractor, episode_url, args, "", episode_logger)
                         if result:
                             successful += 1
                             total_successful += 1
@@ -2693,7 +2698,9 @@ async def process_download_async(session_id, url, options):
 
                     try:
                         extractor = HLSExtractor()
-                        result = await process_single_episode(extractor, episode_url, args, "", logger)
+                        # Create episode-specific logger with episode_key for progress tracking
+                        episode_logger = WebLogger(session_id, episode_key=episode_key)
+                        result = await process_single_episode(extractor, episode_url, args, "", episode_logger)
 
                         if result:
                             total_successful += 1
