@@ -5,24 +5,31 @@ Automated HLS video stream downloader with modern web interface.
 ## Features
 
 - **Series & Episode Management**: Browse, search, and download entire series or specific episodes
-- **Parallel Downloads**: Download multiple episodes simultaneously (configurable 1-10 concurrent)
-- **Smart Caching**: Series data is cached for faster navigation
+- **Parallel Downloads**: Download multiple episodes simultaneously (configurable)
+- **Download Queue**: Queue multiple series/episodes for batch downloading with priority ordering
+- **Real-time Progress**: Live progress tracking with WebSocket updates and download speed display
+- **Episode Progress Tracking**: Individual progress bars per episode with stop/cancel/restart controls
+- **Smart Caching**: Multi-layer caching (disk + hot in-memory cache) for series metadata, cover images, and episodes
+- **Auto-Scraper**: Automatically updates series metadata in the background when idle
+- **Series Catalog**: Browse the full series and anime catalog with search and genre filtering
 - **Language Selection**: Choose audio language/subtitles before download
 - **Multiple Formats**: MKV, MP4, AVI video formats
 - **Audio Extraction**: Extract audio only (MP3, FLAC, AAC, OGG, WAV, Opus)
 - **Quality Selection**: Best, 1080p, 720p, 480p
 - **Video Codec Options**: Auto, H.264, H.265 (HEVC), AV1
-- **Ad Blocking**: Built-in ad and overlay blocking
-- **Real-time Progress**: Live progress tracking with WebSocket updates
-- **Download Queue**: Queue multiple series/episodes for batch downloading
+- **Ad Blocking**: Built-in ad and overlay blocking with auto-updating filter lists
+- **File Verification**: Verify downloaded files for integrity (duration, codecs, resolution)
 - **Plex-compatible Naming**: Output files named for media server compatibility
+- **Settings UI**: Web-based settings page with server restart capability
+- **Drag & Drop Reordering**: Reorder queued episodes via drag and drop
 
 ## Screenshots
 
 The web interface provides:
 - Series catalog browser with search and genre filtering
 - Episode selector with batch selection tools
-- Download queue with real-time progress
+- Download queue with real-time progress per episode
+- Settings page for all configuration options
 - Detailed logs for troubleshooting
 
 ## Installation
@@ -37,7 +44,7 @@ The web interface provides:
 
 ```bash
 # 1. Clone or extract the repository
-cd hls-Downloader
+cd hls-SerienScraper
 
 # 2. Create virtual environment (recommended)
 python -m venv venv
@@ -57,6 +64,15 @@ python run.py
 # Navigate to http://localhost:5000
 ```
 
+Alternatively, use the provided startup scripts:
+```bash
+# Linux/macOS
+./scripts/start_webgui.sh
+
+# Windows
+scripts\start_webgui.bat
+```
+
 ### FFmpeg
 
 FFmpeg is required for video processing and conversion. The tool will **automatically download** FFmpeg on first run if it's not found on your system.
@@ -70,39 +86,54 @@ If you prefer to use your system's FFmpeg installation, simply ensure it's in yo
 ## Project Structure
 
 ```
-hls-Downloader/
-├── app/                      # Main application
+hls-SerienScraper/
+├── app/                          # Main application
 │   ├── __init__.py
-│   ├── browser_pool.py       # Browser instance management
-│   ├── config.py             # Configuration handling
-│   ├── download_queue.py     # Download queue management
-│   ├── ffmpeg_setup.py       # Auto FFmpeg download/setup
-│   ├── hls_downloader_final.py # Core download logic
-│   ├── models.py             # Data models
-│   ├── series_cache.py       # Series data caching
-│   ├── series_catalog.py     # Catalog management
-│   ├── tasks.py              # Background tasks
-│   └── web_gui.py            # Flask web application
+│   ├── browser_pool.py           # Browser instance management
+│   ├── config.py                 # Configuration handling
+│   ├── download_queue.py         # Download queue management
+│   ├── ffmpeg_setup.py           # Auto FFmpeg download/setup
+│   ├── file_verification.py      # Downloaded file integrity checks
+│   ├── hls_downloader_final.py   # Core download logic
+│   ├── series_cache.py           # Series data caching
+│   ├── series_catalog.py         # Catalog management
+│   ├── web_gui.py                # Flask web application & WebSocket
+│   ├── routes/
+│   │   ├── catalog_routes.py     # Series catalog API endpoints
+│   │   └── settings_routes.py    # Settings API endpoints
+│   └── services/
+│       └── cache_manager.py      # Multi-layer cache manager
 │
-├── bin/                      # FFmpeg binaries (auto-downloaded)
+├── bin/                          # FFmpeg binaries (auto-downloaded)
 │
-├── config/                   # Configuration files
-│   ├── requirements.txt      # Python dependencies
-│   └── settings.json         # User settings
+├── config/                       # Configuration files
+│   ├── requirements.txt          # Python dependencies
+│   └── settings.json             # User settings
 │
-├── static/                   # Frontend assets
+├── scripts/                      # Startup scripts
+│   ├── setup.py                  # Initial setup helper
+│   ├── start_webgui.bat          # Windows launcher
+│   ├── start_webgui.sh           # Linux/macOS launcher
+│   ├── start_cli.bat             # Windows CLI launcher
+│   └── start_cli.sh              # Linux/macOS CLI launcher
+│
+├── static/                       # Frontend assets
 │   ├── css/
-│   │   └── style.css         # Application styles
+│   │   ├── style.css             # Main application styles
+│   │   └── settings.css          # Settings page styles
 │   └── js/
-│       └── app.js            # Frontend JavaScript
+│       ├── app.js                # Main frontend JavaScript
+│       └── settings.js           # Settings page JavaScript
 │
-├── templates/                # HTML templates
-│   └── index.html            # Main page template
+├── templates/                    # HTML templates
+│   ├── index.html                # Main page template
+│   └── settings.html             # Settings page template
 │
-├── Downloads/                # Default download directory
-├── series_cache/             # Cached series data
-├── filter_cache/             # Ad-blocking filter cache
-└── run.py                    # Application entry point
+├── Downloads/                    # Default download directory
+├── series_cache/                 # Cached series data
+├── cache/                        # Disk cache (metadata, covers)
+├── filter_cache/                 # Ad-blocking filter cache
+└── run.py                        # Application entry point
 ```
 
 ## Usage
@@ -125,25 +156,53 @@ hls-Downloader/
 ### Advanced Options
 
 - **Wait Time**: Seconds to wait for page load (30-120)
-- **Max Parallel Downloads**: Number of concurrent downloads (1-10)
+- **Max Parallel Downloads**: Number of concurrent downloads
 - **Override Series Name**: Custom name for downloaded files
 - **English Titles**: Use English episode titles if available
 - **Overwrite**: Replace existing files
-- **Auto-Retry**: Automatically retry failed downloads
 
 ## Configuration
 
-Settings are stored in `config/settings.json`:
+Settings can be configured via the **Settings UI** at `/settings` or by editing `config/settings.json` directly:
 
 ```json
 {
-  "download_path": "Downloads",
-  "default_quality": "best",
-  "default_format": "mkv",
-  "max_concurrent": 3,
-  "auto_retry": true
+    "download_path": "./Downloads",
+    "max_parallel_downloads": 3,
+    "max_parallel_limit": 10,
+    "default_format": "mkv",
+    "default_quality": "1080p",
+    "default_wait_time": 60,
+    "audio_only": false,
+    "verify_downloads": true,
+    "browser_max_context_uses": 75,
+    "browser_headless": true,
+    "auto_scraper": {
+        "enabled": true,
+        "idle_threshold_seconds": 30,
+        "scrape_interval_seconds": 25,
+        "batch_size": 10,
+        "min_idle_between_scrapes": 5
+    },
+    "cache": {
+        "enabled": true,
+        "cache_cover_images": true,
+        "cache_episodes": true,
+        "hot_cache_size": 100,
+        "ttl_metadata_days": 7,
+        "ttl_cover_images_days": 90
+    }
 }
 ```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLASK_HOST` | `127.0.0.1` | Server bind address |
+| `FLASK_PORT` | `5000` | Server port |
+| `FLASK_DEBUG` | `false` | Enable debug mode |
+| `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
 ## Dependencies
 
@@ -164,7 +223,7 @@ playwright install chromium --force
 
 ### Port Already in Use
 ```bash
-# Change port in run.py or use environment variable
+# Change port via environment variable
 export FLASK_PORT=5001
 python run.py
 ```
