@@ -12,7 +12,10 @@ import tarfile
 import shutil
 import urllib.request
 import tempfile
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # FFmpeg download URLs for different platforms
 FFMPEG_URLS = {
@@ -77,7 +80,7 @@ def is_ffprobe_installed():
 
 def download_with_progress(url, dest_path):
     """Download a file with progress indication."""
-    print(f"  Downloading from: {url[:60]}...")
+    logger.info(f"Downloading from: {url[:60]}...")
 
     def report_progress(block_num, block_size, total_size):
         if total_size > 0:
@@ -85,17 +88,16 @@ def download_with_progress(url, dest_path):
             downloaded = min(total_size, block_num * block_size)
             mb_downloaded = downloaded / (1024 * 1024)
             mb_total = total_size / (1024 * 1024)
-            print(f"\r  Progress: {percent:.1f}% ({mb_downloaded:.1f}/{mb_total:.1f} MB)", end='', flush=True)
+            logger.info(f"Progress: {percent:.1f}% ({mb_downloaded:.1f}/{mb_total:.1f} MB)")
 
     urllib.request.urlretrieve(url, dest_path, reporthook=report_progress)
-    print()  # New line after progress
 
 def extract_ffmpeg_from_archive(archive_path, dest_dir, archive_type):
     """Extract FFmpeg binaries from archive."""
     system = platform.system()
     config = FFMPEG_URLS.get(system, FFMPEG_URLS['Linux'])
 
-    print(f"  Extracting archive...")
+    logger.info(f"Extracting archive...")
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -123,14 +125,14 @@ def extract_ffmpeg_from_archive(archive_path, dest_dir, archive_type):
             shutil.copy2(ffmpeg_binary, dest_ffmpeg)
             if system != 'Windows':
                 os.chmod(dest_ffmpeg, 0o755)
-            print(f"  ✓ Extracted {config['binary_name']}")
+            logger.info(f"Extracted {config['binary_name']}")
 
         if ffprobe_binary:
             dest_ffprobe = dest_dir / config['probe_name']
             shutil.copy2(ffprobe_binary, dest_ffprobe)
             if system != 'Windows':
                 os.chmod(dest_ffprobe, 0o755)
-            print(f"  ✓ Extracted {config['probe_name']}")
+            logger.info(f"Extracted {config['probe_name']}")
 
         return ffmpeg_binary is not None
 
@@ -139,14 +141,14 @@ def download_ffmpeg():
     system = platform.system()
 
     if system not in FFMPEG_URLS:
-        print(f"  ⚠ Unsupported platform: {system}")
-        print("  Please install FFmpeg manually: https://ffmpeg.org/download.html")
+        logger.warning(f"Unsupported platform: {system}")
+        logger.warning("Please install FFmpeg manually: https://ffmpeg.org/download.html")
         return False
 
     config = FFMPEG_URLS[system]
     bin_dir = get_bin_dir()
 
-    print(f"\n📥 Downloading FFmpeg for {system}...")
+    logger.info(f"Downloading FFmpeg for {system}...")
 
     # Download to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{config["archive_type"]}') as tmp:
@@ -159,14 +161,14 @@ def download_ffmpeg():
         success = extract_ffmpeg_from_archive(temp_archive, bin_dir, config['archive_type'])
 
         if success:
-            print(f"  ✓ FFmpeg installed to: {bin_dir}")
+            logger.info(f"FFmpeg installed to: {bin_dir}")
             return True
         else:
-            print("  ✗ Failed to extract FFmpeg binary")
+            logger.error("Failed to extract FFmpeg binary")
             return False
 
     except Exception as e:
-        print(f"  ✗ Download failed: {e}")
+        logger.error(f"Download failed: {e}")
         return False
     finally:
         # Cleanup temp file
@@ -191,27 +193,27 @@ def ensure_ffmpeg():
     Ensure FFmpeg is available. Downloads if not found.
     Returns True if FFmpeg is available, False otherwise.
     """
-    print("🔍 Checking FFmpeg installation...")
+    logger.info("Checking FFmpeg installation...")
 
     # First, check if it's in our bin folder
     if setup_ffmpeg_path():
-        print("  ✓ FFmpeg found in bin folder")
+        logger.info("FFmpeg found in bin folder")
         return True
 
     # Check system PATH
     if is_ffmpeg_installed():
-        print("  ✓ FFmpeg found in system PATH")
+        logger.info("FFmpeg found in system PATH")
         return True
 
     # Not found - try to download
-    print("  ⚠ FFmpeg not found")
+    logger.warning("FFmpeg not found")
 
     if download_ffmpeg():
         setup_ffmpeg_path()
         return True
 
-    print("\n⚠ FFmpeg is required for video processing.")
-    print("  Please install it manually: https://ffmpeg.org/download.html")
+    logger.warning("FFmpeg is required for video processing.")
+    logger.warning("Please install it manually: https://ffmpeg.org/download.html")
     return False
 
 def get_ffmpeg_executable():
@@ -247,12 +249,12 @@ def get_ffprobe_executable():
 
 if __name__ == '__main__':
     # Test the module
-    print("FFmpeg Setup Test")
-    print("=" * 40)
+    logger.info("FFmpeg Setup Test")
+    logger.info("=" * 40)
 
     if ensure_ffmpeg():
-        print(f"\nFFmpeg executable: {get_ffmpeg_executable()}")
-        print(f"FFprobe executable: {get_ffprobe_executable()}")
+        logger.info(f"FFmpeg executable: {get_ffmpeg_executable()}")
+        logger.info(f"FFprobe executable: {get_ffprobe_executable()}")
     else:
-        print("\nFFmpeg setup failed!")
+        logger.error("FFmpeg setup failed!")
         sys.exit(1)

@@ -4,6 +4,9 @@ Handles series/anime catalog operations
 """
 from flask import Blueprint, request, jsonify
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 from app.series_catalog import (
     scrape_catalog,
     load_catalog_cache,
@@ -48,16 +51,18 @@ def get_catalog():
     if not force_refresh:
         cached = load_catalog_cache(source)
         if cached and not is_catalog_stale(source):
-            print(f"✅ Using cached {source} catalog")
+            logger.info(f"Using cached {source} catalog")
             return jsonify({**cached, 'from_cache': True})
 
     # Scrape fresh catalog
-    print(f"🔄 Scraping fresh {source} catalog...")
+    logger.info(f"Scraping fresh {source} catalog...")
     try:
         loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        catalog_data = loop.run_until_complete(scrape_catalog(source))
-        loop.close()
+        try:
+            catalog_data = loop.run_until_complete(scrape_catalog(source))
+        finally:
+            loop.close()
+
 
         # Save to cache
         save_catalog_cache(catalog_data, source)
@@ -65,7 +70,7 @@ def get_catalog():
         return jsonify({**catalog_data, 'from_cache': False})
 
     except Exception as e:
-        print(f"❌ Error scraping {source} catalog: {e}")
+        logger.error(f"Error scraping {source} catalog: {e}")
         return jsonify({'error': str(e)}), 500
 
 

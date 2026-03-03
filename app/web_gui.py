@@ -47,11 +47,14 @@ from app.series_catalog import (
 )
 from app.config import Config
 from app.file_verification import FileVerifier, format_duration, format_file_size
+from app.services.cache_manager import get_cache_manager
 import subprocess
 import re
 import argparse
 import time
 import uuid
+
+logger = logging.getLogger(__name__)
 
 # Get the project root directory (parent of 'app' folder)
 project_root = Path(__file__).parent.parent
@@ -160,7 +163,7 @@ class ThreadSafeDict:
             for sid in to_remove:
                 del self._data[sid]
             if to_remove:
-                print(f"🧹 Cleaned up {len(to_remove)} old download entries")
+                logger.info(f"Cleaned up {len(to_remove)} old download entries")
             return len(to_remove)
 
 
@@ -217,7 +220,7 @@ class GlobalEpisodeSemaphore:
                 # Increase: release additional slots
                 for _ in range(diff):
                     self._semaphore.release()
-                print(f"🔓 Global semaphore increased to {new_max} slots (+{diff})")
+                logger.info(f"Global semaphore increased to {new_max} slots (+{diff})")
             elif diff < 0:
                 # Decrease: try to acquire slots (non-blocking)
                 # This won't immediately reduce active downloads but will
@@ -227,9 +230,9 @@ class GlobalEpisodeSemaphore:
                     if self._semaphore.acquire(blocking=False):
                         acquired += 1
                 if acquired > 0:
-                    print(f"🔒 Global semaphore decreased to {new_max} slots (-{acquired} acquired)")
+                    logger.info(f"Global semaphore decreased to {new_max} slots (-{acquired} acquired)")
                 else:
-                    print(f"🔒 Global semaphore target set to {new_max} (will take effect as downloads complete)")
+                    logger.info(f"Global semaphore target set to {new_max} (will take effect as downloads complete)")
 
     def acquire(self, timeout: float = None) -> bool:
         """Acquire a download slot. Returns True if acquired, False on timeout."""
@@ -328,7 +331,7 @@ class RobustQueueProcessor:
         """Start the queue processor. Returns True if started, False if already running."""
         with self._lock:
             if self._is_running:
-                print("⚠️ Queue processor already running")
+                logger.warning("Queue processor already running")
                 return False
 
             # Reset shutdown event
@@ -352,25 +355,25 @@ class RobustQueueProcessor:
             self._stats['started_at'] = datetime.now().isoformat()
             self._processor_thread.start()
 
-            print(f"🚀 Queue processor started | Max parallel: {self.max_parallel}")
-            print(f"   Thread: {self._processor_thread.name} | ID: {self._processor_thread.ident}")
+            logger.info(f"Queue processor started | Max parallel: {self.max_parallel}")
+            logger.debug(f"Thread: {self._processor_thread.name} | ID: {self._processor_thread.ident}")
             return True
 
     def stop(self, timeout: float = 30.0) -> bool:
         """Gracefully stop the queue processor."""
         with self._lock:
             if not self._is_running:
-                print("⚠️ Queue processor not running")
+                logger.warning("Queue processor not running")
                 return True
 
-            print("🛑 Stopping queue processor...")
+            logger.info("Stopping queue processor...")
             self._shutdown_event.set()
 
         # Wait for processor thread to finish
         if self._processor_thread:
             self._processor_thread.join(timeout=timeout)
             if self._processor_thread.is_alive():
-                print("⚠️ Queue processor thread did not stop cleanly")
+                logger.warning("Queue processor thread did not stop cleanly")
                 return False
 
         # Shutdown executor
@@ -381,13 +384,14 @@ class RobustQueueProcessor:
 
             self._is_running = False
             self._processor_thread = None
-            print("✅ Queue processor stopped")
+            logger.info("Queue processor stopped")
             return True
 
     def _run_processor_loop(self):
         """Main processor loop with automatic recovery."""
-        print("📋 Queue processor loop started")
+        logger.info("Queue processor loop started")
         last_health_check = time.time()
+        last_cache_cleanup = time.time()
 
         while not self._shutdown_event.is_set():
             try:
@@ -400,6 +404,15 @@ class RobustQueueProcessor:
                     self._check_stuck_downloads()
                     active_downloads.cleanup_old_entries(max_age_hours=1)
                     last_health_check = current_time
+
+                # Periodic cache cleanup (every hour)
+                if current_time - last_cache_cleanup > 3600:
+                    try:
+                        cache_mgr = get_cache_manager()
+                        cache_mgr.cleanup_expired()
+                    except Exception as e:
+                        logger.warning(f"Cache cleanup failed: {e}")
+                    last_cache_cleanup = current_time
 
                 # Start as many series as possible
                 # Note: max_parallel now controls EPISODE parallelism via global_episode_semaphore
@@ -438,12 +451,12 @@ class RobustQueueProcessor:
                     self._wait_for_event(timeout=2.0)
 
             except Exception as e:
-                print(f"❌ Queue processor error: {e}")
+                logger.error(f"Queue processor error: {e}")
                 traceback.print_exc()
                 # Brief pause before retry
                 self._wait_for_event(timeout=5.0)
 
-        print("📋 Queue processor loop ended")
+        logger.info("Queue processor loop ended")
 
     def _wait_for_event(self, timeout: float):
         """Wait for shutdown, wakeup, or timeout - whichever comes first."""
@@ -467,7 +480,7 @@ class RobustQueueProcessor:
 
         with self._lock:
             if session_id in self._active_sessions:
-                print(f"⚠️ Session {session_id[:8]} already active, skipping")
+                logger.warning(f"Session {session_id[:8]} already active, skipping")
                 return
 
             self._active_sessions.add(session_id)
@@ -475,9 +488,9 @@ class RobustQueueProcessor:
             self._stats['total_processed'] += 1
 
         try:
-            print(f"🎬 Starting: {item.series_name} (Session: {session_id[:8]}...)")
-            print(f"   URL: {item.url}")
-            print(f"   Active series: {len(self._active_sessions)} | Global episode slots: {global_episode_semaphore.active_count}/{global_episode_semaphore.max_concurrent}")
+            logger.info(f"Starting: {item.series_name} (Session: {session_id[:8]}...)")
+            logger.debug(f"URL: {item.url}")
+            logger.debug(f"Active series: {len(self._active_sessions)} | Global episode slots: {global_episode_semaphore.active_count}/{global_episode_semaphore.max_concurrent}")
 
             # Mark as processing
             queue_manager.update_status(
@@ -498,7 +511,7 @@ class RobustQueueProcessor:
                 self._active_futures[session_id] = future
 
         except Exception as e:
-            print(f"❌ Failed to start download: {e}")
+            logger.error(f"Failed to start download: {e}")
             self._cleanup_session(session_id, success=False, error=str(e))
 
     def _download_worker(self, item):
@@ -506,13 +519,8 @@ class RobustQueueProcessor:
         session_id = item.session_id
 
         try:
-            print(f"🔄 Worker started: {item.series_name}")
-            print(f"   🌐 Language option: {item.options.get('language', 'NOT SET')}")
-
-            # Update activity timestamp periodically via callback
-            def update_activity():
-                with self._lock:
-                    self._last_activity[session_id] = datetime.now()
+            logger.info(f"Worker started: {item.series_name}")
+            logger.debug(f"Language option: {item.options.get('language', 'NOT SET')}")
 
             # Run the actual download
             run_download_thread(session_id, item.url, item.options)
@@ -520,7 +528,7 @@ class RobustQueueProcessor:
             return {'success': True, 'session_id': session_id}
 
         except Exception as e:
-            print(f"❌ Worker error: {item.series_name} - {e}")
+            logger.error(f"Worker error: {item.series_name} - {e}")
             traceback.print_exc()
             return {'success': False, 'session_id': session_id, 'error': str(e)}
 
@@ -538,7 +546,7 @@ class RobustQueueProcessor:
                 )
                 with self._lock:
                     self._stats['total_completed'] += 1
-                print(f"✅ Completed: {session_id[:8]}...")
+                logger.info(f"Completed: {session_id[:8]}...")
             else:
                 error = result.get('error', 'Unknown error')
                 queue_manager.update_status(
@@ -548,10 +556,10 @@ class RobustQueueProcessor:
                 )
                 with self._lock:
                     self._stats['total_failed'] += 1
-                print(f"❌ Failed: {session_id[:8]}... - {error}")
+                logger.error(f"Failed: {session_id[:8]}... - {error}")
 
         except Exception as e:
-            print(f"❌ Download callback error: {e}")
+            logger.error(f"Download callback error: {e}")
             queue_manager.update_status(
                 session_id,
                 DownloadStatus.FAILED,
@@ -570,7 +578,7 @@ class RobustQueueProcessor:
             self._active_futures.pop(session_id, None)
             self._last_activity.pop(session_id, None)
 
-        print(f"📉 Session cleaned up: {session_id[:8]}... | Active: {len(self._active_sessions)}/{self.max_parallel}")
+        logger.info(f"Session cleaned up: {session_id[:8]}... | Active: {len(self._active_sessions)}/{self.max_parallel}")
 
         if not success and error:
             queue_manager.update_status(
@@ -594,7 +602,7 @@ class RobustQueueProcessor:
                     stuck_sessions.append((session_id, idle_time))
 
         for session_id, idle_time in stuck_sessions:
-            print(f"⚠️ Stuck download detected: {session_id[:8]}... (idle for {idle_time:.0f}s)")
+            logger.warning(f"Stuck download detected: {session_id[:8]}... (idle for {idle_time:.0f}s)")
             # Cancel the stuck download
             self.cancel_download(session_id)
 
@@ -616,7 +624,7 @@ class RobustQueueProcessor:
         )
 
         self._cleanup_session(session_id)
-        print(f"🛑 Cancelled download: {session_id[:8]}...")
+        logger.info(f"Cancelled download: {session_id[:8]}...")
         return True
 
     def update_activity(self, session_id: str):
@@ -638,11 +646,11 @@ class RobustQueueProcessor:
         # Also update local reference (for stats/display purposes)
         with self._lock:
             self.max_parallel = new_max
-            print(f"📊 Max parallel episode downloads set to: {new_max} (limit: {max_limit})")
+            logger.info(f"Max parallel episode downloads set to: {new_max} (limit: {max_limit})")
 
         # If limit was increased, wake up processor to start more downloads immediately
         if new_max > old_max:
-            print(f"⚡ Limit increased, waking up processor to start more downloads...")
+            logger.info(f"Limit increased, waking up processor to start more downloads...")
             self.wakeup()
 
     def get_max_limit(self) -> int:
@@ -724,12 +732,12 @@ class BackgroundAutoScraper:
         """Start the background auto-scraper."""
         with self._lock:
             if not self._enabled:
-                print("ℹ️ Auto-scraper disabled in config")
+                logger.info("Auto-scraper disabled in config")
                 self._stats['current_status'] = 'disabled'
                 return False
 
             if self._is_running:
-                print("⚠️ Auto-scraper already running")
+                logger.warning("Auto-scraper already running")
                 return False
 
             self._shutdown_event.clear()
@@ -743,7 +751,7 @@ class BackgroundAutoScraper:
             self._stats['current_status'] = 'running'
             self._scraper_thread.start()
 
-            print(f"🔄 Background Auto-Scraper started (idle: {self._idle_threshold_seconds}s, interval: {self._scrape_interval_seconds}s)")
+            logger.info(f"Background Auto-Scraper started (idle: {self._idle_threshold_seconds}s, interval: {self._scrape_interval_seconds}s)")
             return True
 
     def stop(self, timeout: float = 10.0) -> bool:
@@ -752,7 +760,7 @@ class BackgroundAutoScraper:
             if not self._is_running:
                 return True
 
-            print("🛑 Stopping Auto-Scraper...")
+            logger.info("Stopping Auto-Scraper...")
             self._shutdown_event.set()
 
         if self._scraper_thread:
@@ -762,7 +770,7 @@ class BackgroundAutoScraper:
             self._is_running = False
             self._scraper_thread = None
             self._stats['current_status'] = 'stopped'
-            print("✅ Auto-Scraper stopped")
+            logger.info("Auto-Scraper stopped")
             return True
 
     def _is_system_idle(self) -> bool:
@@ -771,8 +779,8 @@ class BackgroundAutoScraper:
 
     def _run_scraper_loop(self):
         """Main scraper loop."""
-        print("📋 Auto-Scraper loop started")
-        print(f"   Config: idle_threshold={self._idle_threshold_seconds}s, interval={self._scrape_interval_seconds}s, batch={self._batch_size}")
+        logger.info("Auto-Scraper loop started")
+        logger.debug(f"Config: idle_threshold={self._idle_threshold_seconds}s, interval={self._scrape_interval_seconds}s, batch={self._batch_size}")
         idle_start_time = None
         last_status_log = 0
 
@@ -784,7 +792,7 @@ class BackgroundAutoScraper:
                 if self._is_system_idle():
                     if idle_start_time is None:
                         idle_start_time = current_time
-                        print(f"🔍 Auto-Scraper: System idle, waiting {self._idle_threshold_seconds}s before scraping...")
+                        logger.info(f"Auto-Scraper: System idle, waiting {self._idle_threshold_seconds}s before scraping...")
                         with self._lock:
                             self._stats['current_status'] = 'waiting_for_idle'
 
@@ -798,12 +806,12 @@ class BackgroundAutoScraper:
                         elif current_time - last_status_log > 60:
                             # Log status every 60 seconds when waiting for interval
                             wait_remaining = self._scrape_interval_seconds - (current_time - self._last_scrape_time)
-                            print(f"⏳ Auto-Scraper: Waiting {wait_remaining:.0f}s until next scrape cycle")
+                            logger.info(f"Auto-Scraper: Waiting {wait_remaining:.0f}s until next scrape cycle")
                             last_status_log = current_time
                 else:
                     # Downloads active - reset idle timer
                     if idle_start_time is not None:
-                        print("⏸️ Auto-Scraper: Downloads active, pausing...")
+                        logger.info("Auto-Scraper: Downloads active, pausing...")
                     idle_start_time = None
                     with self._lock:
                         self._stats['current_status'] = 'paused_downloads_active'
@@ -812,13 +820,13 @@ class BackgroundAutoScraper:
                 self._shutdown_event.wait(timeout=5.0)
 
             except Exception as e:
-                print(f"❌ Auto-Scraper error: {e}")
+                logger.error(f"Auto-Scraper error: {e}")
                 traceback.print_exc()
                 with self._lock:
                     self._stats['total_errors'] += 1
                 self._shutdown_event.wait(timeout=30.0)
 
-        print("📋 Auto-Scraper loop ended")
+        logger.info("Auto-Scraper loop ended")
 
     def _perform_scrape_cycle(self):
         """Perform one scrape cycle."""
@@ -830,10 +838,10 @@ class BackgroundAutoScraper:
             series_to_update = get_series_needing_update(limit=self._batch_size)
 
             if series_to_update:
-                print(f"🔄 Auto-Scraper: Found {len(series_to_update)} series needing update")
+                logger.info(f"Auto-Scraper: Found {len(series_to_update)} series needing update")
                 for series_info in series_to_update:
                     if self._shutdown_event.is_set() or not self._is_system_idle():
-                        print("⏸️ Auto-Scraper paused (download started or shutdown)")
+                        logger.info("Auto-Scraper paused (download started or shutdown)")
                         break
 
                     slug = series_info['series_slug']
@@ -849,7 +857,7 @@ class BackgroundAutoScraper:
                 if uncached:
                     # Scrape a few uncached series
                     to_scrape = uncached[:self._batch_size]
-                    print(f"🆕 Auto-Scraper: Found {len(uncached)} uncached series, scraping {len(to_scrape)}")
+                    logger.info(f"Auto-Scraper: Found {len(uncached)} uncached series, scraping {len(to_scrape)}")
 
                     for slug in to_scrape:
                         if self._shutdown_event.is_set() or not self._is_system_idle():
@@ -861,17 +869,17 @@ class BackgroundAutoScraper:
                     # Check if catalog exists and has content
                     catalog_needs_refresh = self._check_catalog_needs_refresh()
                     if catalog_needs_refresh:
-                        print("📚 Auto-Scraper: Catalog empty or stale, refreshing...")
+                        logger.info("Auto-Scraper: Catalog empty or stale, refreshing...")
                         self._refresh_catalog()
                     else:
-                        print("✅ Auto-Scraper: All series cached, nothing to do.")
+                        logger.info("Auto-Scraper: All series cached, nothing to do.")
                         with self._lock:
                             self._stats['current_status'] = 'idle_all_cached'
 
             self._last_scrape_time = time.time()
 
         except Exception as e:
-            print(f"❌ Scrape cycle error: {e}")
+            logger.error(f"Scrape cycle error: {e}")
             traceback.print_exc()
             with self._lock:
                 self._stats['total_errors'] += 1
@@ -885,12 +893,12 @@ class BackgroundAutoScraper:
             self._currently_scraping = series_slug
 
         try:
-            print(f"🔍 Auto-Scraper: Scraping '{series_slug}' ({reason})")
+            logger.info(f"Auto-Scraper: Scraping '{series_slug}' ({reason})")
 
             # Determine base URL from slug or catalog
             base_url = self._get_series_url(series_slug)
             if not base_url:
-                print(f"⚠️ Could not determine URL for {series_slug}")
+                logger.warning(f"Could not determine URL for {series_slug}")
                 return
 
             # Run the async scrape
@@ -921,14 +929,14 @@ class BackgroundAutoScraper:
                     self._stats['last_scrape'] = datetime.now().isoformat()
 
                 status_text = "ongoing" if is_ongoing else f"completed ({result.get('end_date', 'unknown')})"
-                print(f"✅ Auto-Scraper: Updated '{series_slug}' [{status_text}]")
+                logger.info(f"Auto-Scraper: Updated '{series_slug}' [{status_text}]")
             else:
-                print(f"⚠️ Auto-Scraper: Failed to scrape '{series_slug}'")
+                logger.warning(f"Auto-Scraper: Failed to scrape '{series_slug}'")
                 with self._lock:
                     self._stats['total_errors'] += 1
 
         except Exception as e:
-            print(f"❌ Auto-Scraper error for {series_slug}: {e}")
+            logger.error(f"Auto-Scraper error for {series_slug}: {e}")
             with self._lock:
                 self._stats['total_errors'] += 1
 
@@ -983,16 +991,15 @@ class BackgroundAutoScraper:
 
         try:
             # Scrape series catalog
-            print("📚 Auto-Scraper: Scraping series catalog...")
+            logger.info("Auto-Scraper: Scraping series catalog...")
             loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             try:
                 catalog = loop.run_until_complete(scrape_catalog('series'))
                 if catalog and catalog.get('genres'):
                     save_catalog_cache(catalog, 'series')
-                    print(f"✅ Auto-Scraper: Series catalog updated ({catalog.get('total_items', 0)} items)")
+                    logger.info(f"Auto-Scraper: Series catalog updated ({catalog.get('total_items', 0)} items)")
             except Exception as e:
-                print(f"❌ Auto-Scraper: Failed to scrape series catalog: {e}")
+                logger.error(f"Auto-Scraper: Failed to scrape series catalog: {e}")
             finally:
                 loop.close()
 
@@ -1001,21 +1008,20 @@ class BackgroundAutoScraper:
 
             # Scrape anime catalog if still idle
             if self._is_system_idle() and not self._shutdown_event.is_set():
-                print("📚 Auto-Scraper: Scraping anime catalog...")
+                logger.info("Auto-Scraper: Scraping anime catalog...")
                 loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
                 try:
                     catalog = loop.run_until_complete(scrape_catalog('anime'))
                     if catalog and catalog.get('genres'):
                         save_catalog_cache(catalog, 'anime')
-                        print(f"✅ Auto-Scraper: Anime catalog updated ({catalog.get('total_items', 0)} items)")
+                        logger.info(f"Auto-Scraper: Anime catalog updated ({catalog.get('total_items', 0)} items)")
                 except Exception as e:
-                    print(f"❌ Auto-Scraper: Failed to scrape anime catalog: {e}")
+                    logger.error(f"Auto-Scraper: Failed to scrape anime catalog: {e}")
                 finally:
                     loop.close()
 
         except Exception as e:
-            print(f"❌ Auto-Scraper: Catalog refresh error: {e}")
+            logger.error(f"Auto-Scraper: Catalog refresh error: {e}")
             traceback.print_exc()
 
     def _run_async_scrape(self, url: str, series_slug: str) -> Optional[dict]:
@@ -1080,12 +1086,11 @@ class BackgroundAutoScraper:
                 return result
 
             except Exception as e:
-                print(f"❌ Async scrape error: {e}")
+                logger.error(f"Async scrape error: {e}")
                 return None
 
         # Run in new event loop
         loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
             return loop.run_until_complete(do_scrape())
         finally:
@@ -1109,7 +1114,7 @@ class BackgroundAutoScraper:
                 await page.goto(series_url, wait_until="domcontentloaded", timeout=15000)
 
                 # Extract all data in ONE JavaScript call
-                data = await page.evaluate('''
+                data = await page.evaluate(r'''
                     () => {
                         const result = {
                             seasons: null,
@@ -1281,7 +1286,7 @@ class BackgroundAutoScraper:
                 }
 
         except Exception as e:
-            print(f"❌ Series page scrape error: {e}")
+            logger.error(f"Series page scrape error: {e}")
             return None
 
     async def _async_scrape_season(self, season_url: str, season_num: int, browser_pool):
@@ -1349,7 +1354,7 @@ class BackgroundAutoScraper:
                 season_data['episode_details'] = episode_data['details']
 
         except Exception as e:
-            print(f"❌ Season {season_num} scrape error: {e}")
+            logger.error(f"Season {season_num} scrape error: {e}")
             season_data['episodes'] = list(range(1, 13))  # Fallback
 
         return season_data
@@ -1357,11 +1362,6 @@ class BackgroundAutoScraper:
 
 # Initialize the background auto-scraper
 auto_scraper = BackgroundAutoScraper(queue_processor)
-
-# Legacy compatibility variables (kept for backward compatibility)
-queue_processor_running = False  # Deprecated, use queue_processor.is_running
-queue_processor_lock = threading.Lock()
-MAX_PARALLEL_DOWNLOADS = app_config.MAX_PARALLEL_DOWNLOADS  # Legacy reference
 
 # Note: Global episode semaphore is defined earlier (GlobalEpisodeSemaphore class)
 # It controls the total number of concurrent episode downloads across ALL series
@@ -1378,12 +1378,12 @@ parallel_progress_lock = threading.Lock()
 
 def graceful_shutdown(signum=None, frame=None):
     """Handle graceful shutdown on SIGINT/SIGTERM."""
-    print("\n🛑 Shutdown signal received, cleaning up...")
+    logger.info("Shutdown signal received, cleaning up...")
     auto_scraper.stop(timeout=10.0)
     queue_processor.stop(timeout=30.0)
     # Save queue state
     queue_manager.save_queue()
-    print("✅ Cleanup complete")
+    logger.info("Cleanup complete")
 
 # Register shutdown handlers
 atexit.register(graceful_shutdown)
@@ -1398,6 +1398,38 @@ except (ValueError, OSError):
 def generate_session_id():
     """Generate a unique session ID for downloads"""
     return str(uuid.uuid4())
+
+
+class PrintFilter:
+    """Context manager that filters print() output and forwards critical messages to WebLogger.
+    Used to capture print output from external libraries (e.g. yt-dlp) during downloads."""
+
+    CRITICAL_PATTERNS = [
+        '🚀 Download started!', 'Detected URL type:', 'Series:', 'Season:',
+        '🎯 Found m3u8:', '📥 Starting download:', '📊 Download progress:',
+        '📊 FFmpeg progress:', '✅ Download complete:', '❌', '⚠️'
+    ]
+
+    def __init__(self, web_logger):
+        self.web_logger = web_logger
+
+    def __enter__(self):
+        import builtins
+        self._original_print = builtins.print
+
+        def filtered_print(*args, **kwargs):
+            message = ' '.join(map(str, args))
+            self._original_print(*args, **kwargs)
+            if any(p in message for p in self.CRITICAL_PATTERNS):
+                self.web_logger.log(message, "info")
+
+        builtins.print = filtered_print
+        return self
+
+    def __exit__(self, *exc):
+        import builtins
+        builtins.print = self._original_print
+        return False
 
 
 class WebLogger:
@@ -1416,6 +1448,18 @@ class WebLogger:
             'update_last': update_last  # Flag to update last log entry
         })
 
+    def info(self, message):
+        self.log(message, level="info")
+
+    def error(self, message):
+        self.log(message, level="error")
+
+    def warning(self, message):
+        self.log(message, level="warning")
+
+    def debug(self, message):
+        self.log(message, level="debug")
+
     def log_progress(self, message, level="info"):
         """Log progress message that updates the previous progress entry"""
         socketio.emit('log', {
@@ -1426,7 +1470,7 @@ class WebLogger:
             'is_progress': True
         })
 
-    def log_download_progress(self, percent):
+    def log_download_progress(self, percent, speed=None, eta=None):
         """Send download progress and track for parallel aggregation"""
         # Track progress for this episode (for parallel download averaging)
         if self.episode_key:
@@ -1443,14 +1487,18 @@ class WebLogger:
                 'session_id': self.session_id,
                 'episode_key': self.episode_key,
                 'status': 'downloading',
-                'progress': float(percent)
+                'progress': float(percent),
+                'speed': speed,
+                'eta': eta
             })
 
         # Send individual progress event
         socketio.emit('download_progress', {
             'session_id': self.session_id,
             'episode_key': self.episode_key,
-            'percent': float(percent)
+            'percent': float(percent),
+            'speed': speed,
+            'eta': eta
         })
 
         # Update activity tracking for health monitoring
@@ -1504,6 +1552,32 @@ def emit_aggregated_progress(session_id, total_episodes, completed_episodes):
             'active_downloads': agg['active_episodes'],
             'average_active_percent': agg['average_percent']
         })
+
+
+def _verify_downloaded_file(output_path, logger=None):
+    """Verify a downloaded file's integrity if enabled in settings."""
+    from app.config import _json_settings
+    if not _json_settings.get('verify_downloads', True):
+        return
+    if logger:
+        logger.log("🔍 Verifying file integrity...", "info")
+    verifier = FileVerifier()
+    verification = verifier.verify_file(str(output_path))
+    if verification.is_valid:
+        if logger:
+            logger.log("✅ File verification passed", "success")
+            if verification.duration:
+                logger.log(f"   Duration: {format_duration(verification.duration)}", "info")
+            if verification.resolution:
+                logger.log(f"   Resolution: {verification.resolution}", "info")
+            if verification.video_codec:
+                logger.log(f"   Video: {verification.video_codec}", "info")
+            if verification.audio_codec:
+                logger.log(f"   Audio: {verification.audio_codec}", "info")
+    else:
+        if logger:
+            logger.log(f"⚠️ File verification failed: {verification.error}", "warning")
+            logger.log(f"   File size: {format_file_size(verification.file_size)}", "warning")
 
 
 def download_video_with_progress(m3u8_url, output_path, quality="best", codec="auto", logger=None, audio_only=False, audio_format="mp3", audio_bitrate="0"):
@@ -1598,13 +1672,17 @@ def download_video_with_progress(m3u8_url, output_path, quality="best", codec="a
 
             # Parse yt-dlp progress: [download]  45.2% of 123.45MiB at 1.23MiB/s ETA 00:45
             if '[download]' in line and '%' in line:
-                # Extract percentage
+                # Extract percentage, speed, and ETA
                 match = re.search(r'(\d+\.?\d*)%', line)
                 if match:
                     percent = match.group(1)
+                    speed_match = re.search(r'at\s+([\d.]+\s*\w+/s)', line)
+                    eta_match = re.search(r'ETA\s+(\S+)', line)
+                    speed = speed_match.group(1) if speed_match else None
+                    eta = eta_match.group(1) if eta_match else None
                     # Send download progress to status tab
                     if logger:
-                        logger.log_download_progress(percent)
+                        logger.log_download_progress(percent, speed=speed, eta=eta)
                     last_progress = int(float(percent))
 
         return_code = process.wait()
@@ -1613,31 +1691,7 @@ def download_video_with_progress(m3u8_url, output_path, quality="best", codec="a
             if logger:
                 logger.log(f"✅ Download complete: {output_path.name}", "success")
 
-            # Verify downloaded file (if enabled in settings)
-            from app.config import _json_settings
-            if _json_settings.get('verify_downloads', True):
-                if logger:
-                    logger.log("🔍 Verifying file integrity...", "info")
-                verifier = FileVerifier()
-                verification = verifier.verify_file(str(output_path))
-
-                if verification.is_valid:
-                    if logger:
-                        logger.log(f"✅ File verification passed", "success")
-                        if verification.duration:
-                            logger.log(f"   Duration: {format_duration(verification.duration)}", "info")
-                        if verification.resolution:
-                            logger.log(f"   Resolution: {verification.resolution}", "info")
-                        if verification.video_codec:
-                            logger.log(f"   Video: {verification.video_codec}", "info")
-                        if verification.audio_codec:
-                            logger.log(f"   Audio: {verification.audio_codec}", "info")
-                else:
-                    if logger:
-                        logger.log(f"⚠️ File verification failed: {verification.error}", "warning")
-                        logger.log(f"   File size: {format_file_size(verification.file_size)}", "warning")
-                    # Note: We still return True because the download itself succeeded
-                    # The verification warning is logged for user awareness
+            _verify_downloaded_file(output_path, logger)
 
             return True
         else:
@@ -1732,29 +1786,7 @@ def download_video_with_progress(m3u8_url, output_path, quality="best", codec="a
                 if logger:
                     logger.log(f"✅ Download complete: {output_path.name}", "success")
 
-                # Verify downloaded file (if enabled in settings)
-                from app.config import _json_settings
-                if _json_settings.get('verify_downloads', True):
-                    if logger:
-                        logger.log("🔍 Verifying file integrity...", "info")
-                    verifier = FileVerifier()
-                    verification = verifier.verify_file(str(output_path))
-
-                    if verification.is_valid:
-                        if logger:
-                            logger.log(f"✅ File verification passed", "success")
-                            if verification.duration:
-                                logger.log(f"   Duration: {format_duration(verification.duration)}", "info")
-                            if verification.resolution:
-                                logger.log(f"   Resolution: {verification.resolution}", "info")
-                            if verification.video_codec:
-                                logger.log(f"   Video: {verification.video_codec}", "info")
-                            if verification.audio_codec:
-                                logger.log(f"   Audio: {verification.audio_codec}", "info")
-                    else:
-                        if logger:
-                            logger.log(f"⚠️ File verification failed: {verification.error}", "warning")
-                            logger.log(f"   File size: {format_file_size(verification.file_size)}", "warning")
+                _verify_downloaded_file(output_path, logger)
 
                 return True
             else:
@@ -1866,7 +1898,7 @@ async def process_episode_with_semaphore(ep_num, base_url, season, args, episode
     # Log when waiting for global semaphore
     available = global_episode_semaphore.available_slots
     active = global_episode_semaphore.active_count
-    print(f"⏳ {episode_key} waiting for global slot... (active: {active}/{global_episode_semaphore.max_concurrent})")
+    logger.info(f"{episode_key} waiting for global slot... (active: {active}/{global_episode_semaphore.max_concurrent})")
 
     # Acquire global semaphore slot (blocking in thread context)
     # Use run_in_executor to avoid blocking the event loop
@@ -1879,7 +1911,7 @@ async def process_episode_with_semaphore(ep_num, base_url, season, args, episode
         return False
 
     try:
-        print(f"🔓 {episode_key} acquired global slot, starting download... (active: {global_episode_semaphore.active_count}/{global_episode_semaphore.max_concurrent})")
+        logger.info(f"{episode_key} acquired global slot, starting download... (active: {global_episode_semaphore.active_count}/{global_episode_semaphore.max_concurrent})")
 
         # Check if cancelled after acquiring slot
         if cancel_check and cancel_check():
@@ -1928,7 +1960,7 @@ async def process_episode_with_semaphore(ep_num, base_url, season, args, episode
     finally:
         # Always release the global semaphore slot
         global_episode_semaphore.release()
-        print(f"🔒 {episode_key} released global slot (active: {global_episode_semaphore.active_count}/{global_episode_semaphore.max_concurrent})")
+        logger.info(f"{episode_key} released global slot (active: {global_episode_semaphore.active_count}/{global_episode_semaphore.max_concurrent})")
 
 
 async def process_download_async(session_id, url, options):
@@ -2164,23 +2196,7 @@ async def process_download_async(session_id, url, options):
             logger.log(f"🚀 Starting parallel processing (global limit: {global_episode_semaphore.max_concurrent})...", "info")
             logger.log(f"📊 Collecting tasks for {total_episodes_all_seasons} episodes across {len(seasons_to_download)} season(s)...", "info")
 
-            # Custom print function for filtering verbose logs
-            original_print = print
-            def custom_print(*args, **kwargs):
-                message = ' '.join(map(str, args))
-                critical_patterns = [
-                    '🚀 Download started!', 'Detected URL type:', 'Series:', 'Season:',
-                    '🎯 Found m3u8:', '📥 Starting download:', '📊 Download progress:',
-                    '📊 FFmpeg progress:', '✅ Download complete:', '❌', '⚠️'
-                ]
-                original_print(*args, **kwargs)
-                if any(pattern in message for pattern in critical_patterns):
-                    logger.log(message, "info")
-
-            import builtins
-            builtins.print = custom_print
-
-            try:
+            with PrintFilter(logger):
                 # Thread-safe counters for live progress updates
                 import threading
                 progress_lock = threading.Lock()
@@ -2346,9 +2362,6 @@ async def process_download_async(session_id, url, options):
                     'failed_episodes': all_failed_episodes
                 })
 
-            finally:
-                builtins.print = original_print
-
         else:
             # =====================================================
             # SEQUENTIAL MODE: Process seasons one by one
@@ -2399,86 +2412,54 @@ async def process_download_async(session_id, url, options):
                     try:
                         extractor = HLSExtractor()
 
-                        # Monkey-patch print to filter verbose logs - only show end-user relevant info
-                        original_print = print
-                        def custom_print(*args, **kwargs):
-                            message = ' '.join(map(str, args))
+                        # Create episode-specific logger with episode_key for progress tracking
+                        episode_key = f"S{season:02d}E{ep_num:02d}"
+                        episode_logger = WebLogger(session_id, episode_key=episode_key)
 
-                            # Only show critical messages for end users
-                            critical_patterns = [
-                                '🚀 Download started!',
-                                'Detected URL type:',
-                                'Series:',
-                                'Season:',
-                                '🎯 Found m3u8:',
-                                '📥 Starting download:',
-                                '📊 Download progress:',
-                                '📊 FFmpeg progress:',
-                                '✅ Download complete:',
-                                '❌',
-                                '⚠️'
-                            ]
-
-                            # Log to console always
-                            original_print(*args, **kwargs)
-
-                            # Only send to WebUI if it's critical
-                            if any(pattern in message for pattern in critical_patterns):
-                                logger.log(message, "info")
-
-                        # Temporarily replace print
-                        import builtins
-                        builtins.print = custom_print
-
-                        try:
-                            # Create episode-specific logger with episode_key for progress tracking
-                            episode_key = f"S{season:02d}E{ep_num:02d}"
-                            episode_logger = WebLogger(session_id, episode_key=episode_key)
+                        with PrintFilter(logger):
                             result = await process_single_episode(extractor, episode_url, args, "", episode_logger)
-                            if result:
-                                successful += 1
-                                total_successful += 1
 
-                                # Update queue manager with completed count
-                                queue_manager.update_progress(
-                                    session_id,
-                                    completed=total_successful
-                                )
+                        if result:
+                            successful += 1
+                            total_successful += 1
 
-                                # Emit progress event with COMPLETED count (not just started)
-                                socketio.emit('progress', {
-                                    'session_id': session_id,
-                                    'current': total_successful,  # COMPLETED episodes
-                                    'total': total_episodes_all_seasons,
-                                    'episode': f"S{season:02d}E{ep_num:02d} ✓",
-                                    'completed': total_successful  # Explicit completed count
-                                })
+                            # Update queue manager with completed count
+                            queue_manager.update_progress(
+                                session_id,
+                                completed=total_successful
+                            )
 
-                                # Update success counter immediately with global totals
-                                socketio.emit('status', {
-                                    'session_id': session_id,
-                                    'status': 'processing',
-                                    'message': f'Episode S{season:02d}E{ep_num:02d} completed',
-                                    'successful': total_successful,
-                                    'failed': total_failed
-                                })
-                            else:
-                                failed += 1
-                                total_failed += 1
-                                failed_episodes.append(ep_num)
-                                all_failed_episodes.append(f"S{season:02d}E{ep_num:02d}")
-                                # Update failed counter immediately with global totals
-                                socketio.emit('status', {
-                                    'session_id': session_id,
-                                    'status': 'processing',
-                                    'message': f'Episode S{season:02d}E{ep_num:02d} failed',
-                                    'successful': total_successful,
-                                    'failed': total_failed,
-                                    'failed_episodes': all_failed_episodes
-                                })
-                        finally:
-                            # Restore original print
-                            builtins.print = original_print
+                            # Emit progress event with COMPLETED count (not just started)
+                            socketio.emit('progress', {
+                                'session_id': session_id,
+                                'current': total_successful,  # COMPLETED episodes
+                                'total': total_episodes_all_seasons,
+                                'episode': f"S{season:02d}E{ep_num:02d} ✓",
+                                'completed': total_successful  # Explicit completed count
+                            })
+
+                            # Update success counter immediately with global totals
+                            socketio.emit('status', {
+                                'session_id': session_id,
+                                'status': 'processing',
+                                'message': f'Episode S{season:02d}E{ep_num:02d} completed',
+                                'successful': total_successful,
+                                'failed': total_failed
+                            })
+                        else:
+                            failed += 1
+                            total_failed += 1
+                            failed_episodes.append(ep_num)
+                            all_failed_episodes.append(f"S{season:02d}E{ep_num:02d}")
+                            # Update failed counter immediately with global totals
+                            socketio.emit('status', {
+                                'session_id': session_id,
+                                'status': 'processing',
+                                'message': f'Episode S{season:02d}E{ep_num:02d} failed',
+                                'successful': total_successful,
+                                'failed': total_failed,
+                                'failed_episodes': all_failed_episodes
+                            })
 
                     except Exception as e:
                         failed += 1
@@ -2523,28 +2504,6 @@ async def process_download_async(session_id, url, options):
             failed = 0
             failed_episodes = []
 
-            # Create args object
-            class Args:
-                def __init__(self, options):
-                    self.wait = options.get('wait', app_config.DEFAULT_WAIT_TIME)
-                    self.no_adblock = not options.get('adblock', True)
-                    self.base_path = Config.get_download_path()
-                    self.english_title = options.get('english_title', False)
-                    self.series_display = options.get('series_display', None)
-                    self.quality = options.get('quality', 'best')
-                    self.quality_tag = options.get('quality_tag', app_config.DEFAULT_QUALITY)
-                    self.format = options.get('format', app_config.DEFAULT_FORMAT)
-                    self.codec = options.get('codec', 'auto')
-                    self.no_download = False
-                    self.force = options.get('force', False)
-                    self.parallel = options.get('parallel', 1)
-                    self.audio_only = options.get('audio_only', False)  # Audio only mode
-                    self.audio_format = options.get('audio_format', 'mp3')  # Audio format (mp3, flac, etc.)
-                    self.audio_bitrate = options.get('audio_bitrate', '0')  # Audio bitrate (0 = best)
-                    self.language = options.get('language', '')  # Language key for download
-
-            args = Args(options)
-
             # Determine URL pattern for this extra type
             # filme -> /filme/film-N
             # specials -> /specials/episode-N (specials usually use episode-N)
@@ -2583,55 +2542,39 @@ async def process_download_async(session_id, url, options):
                 try:
                     extractor = HLSExtractor()
 
-                    # Use standard print filtering
-                    original_print = print
-                    def custom_print(*args, **kwargs):
-                        message = ' '.join(map(str, args))
-                        critical_patterns = [
-                            '🚀 Download started!', '🎯 Found m3u8:', '📥 Starting download:',
-                            '📊 Download progress:', '📊 FFmpeg progress:', '✅ Download complete:',
-                            '❌', '⚠️'
-                        ]
-                        original_print(*args, **kwargs)
-                        if any(pattern in message for pattern in critical_patterns):
-                            logger.log(message, "info")
+                    # Create episode-specific logger with episode_key for progress tracking
+                    episode_logger = WebLogger(session_id, episode_key=episode_key)
 
-                    import builtins
-                    builtins.print = custom_print
-
-                    try:
-                        # Create episode-specific logger with episode_key for progress tracking
-                        episode_logger = WebLogger(session_id, episode_key=episode_key)
+                    with PrintFilter(logger):
                         result = await process_single_episode(extractor, episode_url, args, "", episode_logger)
-                        if result:
-                            successful += 1
-                            total_successful += 1
 
-                            queue_manager.update_progress(session_id, completed=total_successful)
+                    if result:
+                        successful += 1
+                        total_successful += 1
 
-                            socketio.emit('progress', {
-                                'session_id': session_id,
-                                'current': total_successful,
-                                'total': total_episodes_all_seasons,
-                                'episode': f"{extra_label} {ep_num} ✓",
-                                'completed': total_successful
-                            })
+                        queue_manager.update_progress(session_id, completed=total_successful)
 
-                            socketio.emit('status', {
-                                'session_id': session_id,
-                                'status': 'processing',
-                                'message': f'{extra_label} {ep_num} completed',
-                                'successful': total_successful,
-                                'failed': total_failed
-                            })
-                        else:
-                            failed += 1
-                            total_failed += 1
-                            failed_episodes.append(ep_num)
-                            all_failed_episodes.append(episode_key)
-                            logger.log(f"❌ {extra_label} {ep_num} - Failed", "error")
-                    finally:
-                        builtins.print = original_print
+                        socketio.emit('progress', {
+                            'session_id': session_id,
+                            'current': total_successful,
+                            'total': total_episodes_all_seasons,
+                            'episode': f"{extra_label} {ep_num} ✓",
+                            'completed': total_successful
+                        })
+
+                        socketio.emit('status', {
+                            'session_id': session_id,
+                            'status': 'processing',
+                            'message': f'{extra_label} {ep_num} completed',
+                            'successful': total_successful,
+                            'failed': total_failed
+                        })
+                    else:
+                        failed += 1
+                        total_failed += 1
+                        failed_episodes.append(ep_num)
+                        all_failed_episodes.append(episode_key)
+                        logger.log(f"❌ {extra_label} {ep_num} - Failed", "error")
 
                 except Exception as e:
                     failed += 1
@@ -2812,7 +2755,6 @@ async def process_download_async(session_id, url, options):
 def run_download_thread(session_id, url, options):
     """Run download in a separate thread with asyncio"""
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(process_download_async(session_id, url, options))
     finally:
@@ -2845,14 +2787,14 @@ def start_download():
     options = data.get('options', {})
 
     # DEBUG: Log incoming options including language
-    print(f"📥 /api/start received:")
-    print(f"   URL: {url}")
-    print(f"   Language in options: '{options.get('language', 'NOT FOUND')}'")
-    print(f"   All options keys: {list(options.keys())}")
+    logger.debug(f"/api/start received:")
+    logger.debug(f"URL: {url}")
+    logger.debug(f"Language in options: '{options.get('language', 'NOT FOUND')}'")
+    logger.debug(f"All options keys: {list(options.keys())}")
     episodes_per_season = data.get('episodes_per_season')
-    print(f"   episodes_per_season: {episodes_per_season}")
-    print(f"   seasons: {options.get('seasons')}")
-    print(f"   episodes: {options.get('episodes')}")
+    logger.debug(f"episodes_per_season: {episodes_per_season}")
+    logger.debug(f"seasons: {options.get('seasons')}")
+    logger.debug(f"episodes: {options.get('episodes')}")
 
     # Extract series name from URL if not already provided
     if not options.get('series_display'):
@@ -2864,7 +2806,7 @@ def start_download():
                 options['series_display'] = series_name
         except Exception as e:
             # If parsing fails, use a default name
-            print(f"Warning: Could not extract series name from URL: {e}")
+            logger.warning(f"Could not extract series name from URL: {e}")
             options['series_display'] = 'Unknown Series'
 
     # Check if this series is already in the queue (queued or processing)
@@ -2932,13 +2874,13 @@ def cancel_download(session_id):
     if session_id in active_downloads:
         active_downloads[session_id]['status'] = 'cancelled'
         cancelled = True
-        print(f"🛑 Cancelled active download: {session_id}")
+        logger.info(f"Cancelled active download: {session_id}")
 
     # Also update queue status so UI shows cancelled
     queue_result = queue_manager.update_status(session_id, DownloadStatus.CANCELLED)
     if queue_result:
         cancelled = True
-        print(f"🛑 Updated queue status to cancelled: {session_id}")
+        logger.info(f"Updated queue status to cancelled: {session_id}")
 
     # Emit status update via WebSocket for immediate UI update
     if cancelled:
@@ -2965,9 +2907,7 @@ def start_queue_processor():
     Start the robust queue processor and background auto-scraper.
     Uses the new RobustQueueProcessor class for better stability.
     """
-    global queue_processor_running
-
-    print(f"🔧 start_queue_processor() called | Currently running: {queue_processor.is_running}")
+    logger.info(f"start_queue_processor() called | Currently running: {queue_processor.is_running}")
 
     # Use the new robust processor
     started = queue_processor.start()
@@ -2976,10 +2916,6 @@ def start_queue_processor():
     if started:
         auto_scraper.start()
 
-    # Update legacy flag for backward compatibility
-    with queue_processor_lock:
-        queue_processor_running = queue_processor.is_running
-
     return started
 
 
@@ -2987,55 +2923,14 @@ def stop_queue_processor(timeout: float = 30.0):
     """
     Gracefully stop the queue processor and auto-scraper.
     """
-    global queue_processor_running
-
-    print(f"🛑 stop_queue_processor() called")
+    logger.info(f"stop_queue_processor() called")
 
     # Stop auto-scraper first
     auto_scraper.stop(timeout=10.0)
 
     stopped = queue_processor.stop(timeout=timeout)
 
-    # Update legacy flag
-    with queue_processor_lock:
-        queue_processor_running = False
-
     return stopped
-
-
-def process_download_worker(item):
-    """
-    Worker function to process a single download in thread pool.
-    Now with better error handling and activity tracking.
-    """
-    session_id = item.session_id
-
-    try:
-        print(f"🔄 Worker processing: {item.series_name}")
-        print(f"   Session: {session_id[:8]}...")
-        print(f"   Options:")
-        print(f"      - parallel: {item.options.get('parallel')}")
-        print(f"      - base_path: {item.options.get('base_path')}")
-        print(f"      - seasons: {item.options.get('seasons')}")
-        print(f"      - episodes: {item.options.get('episodes')}")
-        print(f"      - language: {item.options.get('language', 'NOT SET')}")
-
-        # Update activity to prevent stuck detection
-        queue_processor.update_activity(session_id)
-
-        # Process the download using existing logic
-        run_download_thread(session_id, item.url, item.options)
-
-        # Final activity update
-        queue_processor.update_activity(session_id)
-
-        print(f"✅ Worker completed: {item.series_name}")
-        return {'success': True, 'session_id': session_id}
-
-    except Exception as e:
-        print(f"❌ Worker failed: {item.series_name} - {e}")
-        traceback.print_exc()
-        return {'success': False, 'session_id': session_id, 'error': str(e)}
 
 
 @app.route('/api/parse-url', methods=['POST'])
@@ -3059,7 +2954,7 @@ def parse_url():
         if not force_refresh:
             cached_data = load_from_cache(series_slug)
             if cached_data:
-                print(f"✅ Using cached data for {series_slug}")
+                logger.info(f"Using cached data for {series_slug}")
                 # Return cached data with cache indicator
                 return jsonify({
                     'from_cache': True,
@@ -3119,7 +3014,7 @@ def parse_url():
                 # Step 2: Scrape ALL seasons in parallel with browser pool
                 # Calculate total tasks (seasons + extra tabs)
                 total_tasks = total_seasons + len(extra_tabs)
-                print(f"🔍 Scraping {total_seasons} season(s)" + (f" + {len(extra_tabs)} extra tab(s)" if extra_tabs else "") + f" for {series_slug}...")
+                logger.info(f"Scraping {total_seasons} season(s)" + (f" + {len(extra_tabs)} extra tab(s)" if extra_tabs else "") + f" for {series_slug}...")
 
                 # Use browser pool for efficient parallel scraping
                 from app.browser_pool import BrowserPool
@@ -3145,37 +3040,37 @@ def parse_url():
                 season_results = all_results[:total_seasons]
                 for s_num, s_result in enumerate(season_results, 1):
                     if isinstance(s_result, Exception):
-                        print(f"⚠️  Season {s_num} failed: {s_result}")
+                        logger.warning(f"Season {s_num} failed: {s_result}")
                         result['seasons_data'][s_num] = {
                             'episodes': [],
                             'episode_details': {}
                         }
                     else:
                         result['seasons_data'][s_num] = s_result
-                        print(f"✅ Season {s_num}: {len(s_result['episodes'])} episodes")
+                        logger.info(f"Season {s_num}: {len(s_result['episodes'])} episodes")
 
                         # Extract languages from first successful season (if not already set)
                         if not result['languages'] and s_result.get('languages'):
                             result['languages'] = s_result['languages']
                             lang_names = [l.get('name', l.get('key', '?')) for l in result['languages']]
-                            print(f"🌐 Found languages: {', '.join(lang_names)}")
+                            logger.info(f"Found languages: {', '.join(lang_names)}")
 
                 # Process extra tab results
                 extra_results = all_results[total_seasons:]
                 for idx, extra_tab in enumerate(extra_tabs):
                     e_result = extra_results[idx]
                     if isinstance(e_result, Exception):
-                        print(f"⚠️  {extra_tab.capitalize()} failed: {e_result}")
+                        logger.warning(f"{extra_tab.capitalize()} failed: {e_result}")
                         result['extras_data'][extra_tab] = {
                             'episodes': [],
                             'episode_details': {}
                         }
                     else:
                         result['extras_data'][extra_tab] = e_result
-                        print(f"✅ {extra_tab.capitalize()}: {len(e_result['episodes'])} episodes")
+                        logger.info(f"{extra_tab.capitalize()}: {len(e_result['episodes'])} episodes")
 
             except Exception as e:
-                print(f"❌ Error scraping series: {e}")
+                logger.error(f"Error scraping series: {e}")
                 # Fallback: at least return the requested season
                 if url_type in ['season', 'full'] and season:
                     result['total_seasons'] = season
@@ -3381,12 +3276,12 @@ def parse_url():
 
                     # Log series name if found
                     if result['series_name']:
-                        print(f"  📺 Series name: {result['series_name']}")
+                        logger.debug(f"Series name: {result['series_name']}")
 
                     # Log languages if found
                     if result['languages']:
                         lang_names = [l.get('name', l.get('key', '?')) for l in result['languages']]
-                        print(f"  🌐 Found languages: {', '.join(lang_names)}")
+                        logger.debug(f"Found languages: {', '.join(lang_names)}")
 
                     # Make absolute URL if relative
                     if result['cover_url'] and result['cover_url'].startswith('/'):
@@ -3396,236 +3291,16 @@ def parse_url():
 
                     # Log extra tabs if found
                     if result['extra_tabs']:
-                        print(f"  📁 Found extra tabs: {result['extra_tabs']}")
+                        logger.debug(f"Found extra tabs: {result['extra_tabs']}")
 
                     await browser.close()
 
             except Exception as e:
-                print(f"  ❌ Failed to scrape series page: {e}")
+                logger.error(f"Failed to scrape series page: {e}")
 
             return result
 
-        # Helper function to scrape a single season with retry logic
-        async def scrape_season_details(season_url, season_num, max_retries=2):
-            """Scrape episode list and titles for a single season with retry logic"""
-            from playwright.async_api import async_playwright
-            import asyncio
-
-            season_data = {
-                'episodes': [],
-                'episode_details': {},  # { ep_num: { title_de: "", title_en: "" } }
-                'languages': []  # Available languages on this season page
-            }
-
-            for attempt in range(max_retries + 1):
-                try:
-                    async with async_playwright() as p:
-                        browser = await p.chromium.launch(
-                            headless=True,
-                            args=['--mute-audio', '--disable-dev-shm-usage']
-                        )
-
-                        # Set longer timeout
-                        context = await browser.new_context()
-                        page = await context.new_page()
-                        page.set_default_timeout(30000)  # 30 seconds timeout
-
-                        # OPTIMIZED: Use domcontentloaded instead of networkidle (2-3x faster)
-                        await page.goto(season_url, wait_until="domcontentloaded", timeout=15000)
-
-                        # OPTIMIZED: Extract ALL episode data in ONE JavaScript evaluation
-                        # Also handles /film- links for Filme pages
-                        episode_data = await page.evaluate('''
-                            () => {
-                                const episodes = new Set();
-                                const details = {};
-                                const languages = [];
-
-                                // Helper function to extract language from flag image
-                                const extractLanguageFromFlag = (img) => {
-                                    const src = img.getAttribute('src') || '';
-                                    const title = img.getAttribute('title') || '';
-                                    const alt = img.getAttribute('alt') || '';
-                                    const srcFilename = src.split('/').pop().replace('.svg', '').toLowerCase();
-
-                                    // Build a readable name from available attributes
-                                    // For anime: japanese-german.svg -> "Japanisch mit deutschem Untertitel"
-                                    let langName = srcFilename;
-                                    if (title) {
-                                        // Use full title, not split - keep "Mit deutschem Untertitel" etc.
-                                        langName = title.trim();
-                                    } else if (alt) {
-                                        langName = alt.split(',')[0].trim();
-                                    } else {
-                                        // Fallback: Generate readable name from srcFile
-                                        const readableNames = {
-                                            'german': 'Deutsch',
-                                            'english': 'Englisch',
-                                            'japanese': 'Japanisch',
-                                            'japanese-german': 'Japanisch (Deutsche UT)',
-                                            'japanese-english': 'Japanisch (Englische UT)',
-                                            'english-german': 'Englisch (Deutsche UT)'
-                                        };
-                                        langName = readableNames[srcFilename] || srcFilename;
-                                    }
-
-                                    // Map SVG filename to actual data-lang-key values used on the site
-                                    const langKeyMap = {
-                                        'german': '1',
-                                        'english': '2',
-                                        'english-german': '3',  // Englisch mit deutschen Untertiteln
-                                        'japanese-german': '3', // Japanisch mit dt. UT
-                                        'japanese-english': 'japanese-english', // Keep as-is for anime
-                                        'french': '4',
-                                        'spanish': '5',
-                                        'gersub': '3',          // German subtitles variant
-                                        'engsub': '3'           // English subtitles variant
-                                    };
-                                    const langKey = langKeyMap[srcFilename] || srcFilename;
-
-                                    return {
-                                        key: langKey,
-                                        name: langName,
-                                        icon: src,
-                                        srcFile: srcFilename,
-                                        title: title,  // Store raw title for frontend
-                                        alt: alt       // Store raw alt for frontend
-                                    };
-                                };
-
-                                // Get all episode AND film links (for Filme pages)
-                                const links = document.querySelectorAll('a[href*="/episode-"], a[href*="/film-"]');
-                                links.forEach(link => {
-                                    const href = link.getAttribute('href');
-                                    if (href) {
-                                        try {
-                                            // Handle both /episode-N and /film-N patterns
-                                            let epMatch = null;
-                                            if (href.includes('/episode-')) {
-                                                epMatch = href.split('/episode-')[1];
-                                            } else if (href.includes('/film-')) {
-                                                epMatch = href.split('/film-')[1];
-                                            }
-                                            if (epMatch) {
-                                                const epNum = parseInt(epMatch.split('/')[0].split('?')[0]);
-                                                if (!isNaN(epNum)) {
-                                                    episodes.add(epNum);
-                                                }
-                                            }
-                                        } catch (e) {}
-                                    }
-                                });
-
-                                // Get episode titles AND languages from rows
-                                const rows = document.querySelectorAll('tr[data-episode-id], .episodeWrapper');
-                                const allLangsSet = new Set();
-                                rows.forEach(row => {
-                                    try {
-                                        const epLink = row.querySelector('a[href*="/episode-"], a[href*="/film-"]');
-                                        if (epLink) {
-                                            const href = epLink.getAttribute('href');
-                                            let epNum = null;
-                                            if (href.includes('/episode-')) {
-                                                epNum = parseInt(href.split('/episode-')[1].split('/')[0]);
-                                            } else if (href.includes('/film-')) {
-                                                epNum = parseInt(href.split('/film-')[1].split('/')[0]);
-                                            }
-
-                                            if (epNum && !isNaN(epNum)) {
-                                                const deTitleElem = row.querySelector('.episodeGermanTitle, .seasonEpisodeTitle strong');
-                                                const enTitleElem = row.querySelector('.episodeEnglishTitle, small');
-
-                                                const titleDe = deTitleElem ? deTitleElem.textContent.trim() : '';
-                                                const titleEn = enTitleElem ? enTitleElem.textContent.trim() : '';
-
-                                                // Extract languages for this specific episode
-                                                const episodeLangs = [];
-                                                const seenInEpisode = new Set();
-                                                const flagsInRow = row.querySelectorAll('td.editFunctions img.flag, .editFunctions img.flag, img.flag');
-                                                flagsInRow.forEach(img => {
-                                                    const lang = extractLanguageFromFlag(img);
-                                                    if (!seenInEpisode.has(lang.srcFile)) {
-                                                        seenInEpisode.add(lang.srcFile);
-                                                        episodeLangs.push(lang);
-                                                        allLangsSet.add(JSON.stringify(lang));
-                                                    }
-                                                });
-
-                                                details[epNum] = {
-                                                    title_de: titleDe,
-                                                    title_en: titleEn,
-                                                    languages: episodeLangs
-                                                };
-                                            }
-                                        }
-                                    } catch (e) {}
-                                });
-
-                                // Build overall languages list from all episodes
-                                allLangsSet.forEach(langJson => {
-                                    languages.push(JSON.parse(langJson));
-                                });
-
-                                // Fallback: Also check changeLanguageBox (on episode pages)
-                                if (languages.length === 0) {
-                                    const langBox = document.querySelector('.changeLanguageBox');
-                                    if (langBox) {
-                                        const langImages = langBox.querySelectorAll('img[data-lang-key]');
-                                        langImages.forEach(img => {
-                                            const langKey = img.getAttribute('data-lang-key');
-                                            const title = img.getAttribute('title') || '';
-                                            const alt = img.getAttribute('alt') || '';
-                                            const isSelected = img.classList.contains('selectedLanguage');
-                                            const src = img.getAttribute('src') || '';
-                                            const srcFilename = src.split('/').pop().replace('.svg', '').toLowerCase();
-                                            const langName = title || (alt ? alt.split(',')[0].trim() : srcFilename);
-
-                                            languages.push({
-                                                key: langKey,
-                                                name: langName,
-                                                selected: isSelected,
-                                                icon: src,
-                                                srcFile: srcFilename
-                                            });
-                                        });
-                                    }
-                                }
-
-                                return {
-                                    episodes: Array.from(episodes).sort((a, b) => a - b),
-                                    details: details,
-                                    languages: languages
-                                };
-                            }
-                        ''')
-
-                        season_data['episodes'] = episode_data['episodes']
-                        season_data['episode_details'] = episode_data['details']
-                        season_data['languages'] = episode_data.get('languages', [])
-
-                        await browser.close()
-
-                        # Success - break retry loop
-                        if season_data['episodes']:
-                            break
-                        elif attempt < max_retries:
-                            print(f"  🔄 Retry {attempt + 1}/{max_retries} for Season {season_num}")
-                            await asyncio.sleep(2)  # Wait before retry
-
-                except Exception as e:
-                    print(f"  ❌ Attempt {attempt + 1} failed for Season {season_num}: {str(e)[:100]}")
-
-                    if attempt < max_retries:
-                        print(f"  🔄 Retrying Season {season_num} in 2 seconds...")
-                        await asyncio.sleep(2)
-                    else:
-                        # Final fallback: return default episodes
-                        print(f"  ⚠️ Using fallback episodes (1-12) for Season {season_num}")
-                        season_data['episodes'] = list(range(1, 13))
-
-            return season_data
-
-        # NEW: Pooled version using browser pool for parallel scraping
+        # Pooled version using browser pool for parallel scraping
         async def scrape_season_details_pooled(season_url, season_num, browser_pool, max_retries=2):
             """Scrape episode list using browser pool - OPTIMIZED for parallel execution"""
             from app.browser_pool import PooledPageContext
@@ -3817,28 +3492,27 @@ def parse_url():
                         if season_data['episodes']:
                             break
                         elif attempt < max_retries:
-                            print(f"  🔄 Retry {attempt + 1}/{max_retries} for Season {season_num}")
+                            logger.info(f"Retry {attempt + 1}/{max_retries} for Season {season_num}")
                             await asyncio.sleep(1)
 
                 except Exception as e:
-                    print(f"  ❌ Attempt {attempt + 1} failed for Season {season_num}: {str(e)[:100]}")
+                    logger.error(f"Attempt {attempt + 1} failed for Season {season_num}: {str(e)[:100]}")
 
                     if attempt < max_retries:
-                        print(f"  🔄 Retrying Season {season_num} in 1 second...")
+                        logger.info(f"Retrying Season {season_num} in 1 second...")
                         await asyncio.sleep(1)
                     else:
                         # Final fallback: return default episodes
-                        print(f"  ⚠️ Using fallback episodes (1-12) for Season {season_num}")
+                        logger.warning(f"Using fallback episodes (1-12) for Season {season_num}")
                         season_data['episodes'] = list(range(1, 13))
 
             return season_data
 
         # Cache miss or forced refresh - scrape fresh data
-        print(f"🔍 Scraping fresh data for {series_slug} (force_refresh={force_refresh})")
+        logger.info(f"Scraping fresh data for {series_slug} (force_refresh={force_refresh})")
 
         # Run async scraping in new event loop
         loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
             result = loop.run_until_complete(scrape_all_seasons())
         finally:
@@ -3862,7 +3536,7 @@ def parse_url():
         }
         save_to_cache(series_slug, cache_data)
         extra_info = f" + {len(result.get('extra_tabs', []))} extras" if result.get('extra_tabs') else ""
-        print(f"💾 Saved {series_slug} to cache ({result.get('total_seasons')} seasons{extra_info})")
+        logger.info(f"Saved {series_slug} to cache ({result.get('total_seasons')} seasons{extra_info})")
 
         # Add cache indicator to response
         result['from_cache'] = False
@@ -3906,16 +3580,16 @@ def debug_queue():
         'timestamp': datetime.now().isoformat()
     }
 
-    print("=" * 60)
-    print("🔍 QUEUE DEBUG INFO (Robust Processor)")
-    print("=" * 60)
-    print(f"Queue Processor Running: {processor_stats['is_running']}")
-    print(f"Active Downloads: {processor_stats['active_downloads']}/{processor_stats['max_parallel']}")
-    print(f"Total Processed: {processor_stats['total_processed']}")
-    print(f"Completed: {processor_stats['total_completed']} | Failed: {processor_stats['total_failed']}")
-    print(f"Queue - Total: {queue_status['total']} | Queued: {queue_status['queued']} | Processing: {queue_status['processing']}")
-    print(f"Next Item: {next_item.series_name if next_item else 'None'}")
-    print("=" * 60)
+    logger.debug("=" * 60)
+    logger.debug("QUEUE DEBUG INFO (Robust Processor)")
+    logger.debug("=" * 60)
+    logger.debug(f"Queue Processor Running: {processor_stats['is_running']}")
+    logger.debug(f"Active Downloads: {processor_stats['active_downloads']}/{processor_stats['max_parallel']}")
+    logger.debug(f"Total Processed: {processor_stats['total_processed']}")
+    logger.debug(f"Completed: {processor_stats['total_completed']} | Failed: {processor_stats['total_failed']}")
+    logger.debug(f"Queue - Total: {queue_status['total']} | Queued: {queue_status['queued']} | Processing: {queue_status['processing']}")
+    logger.debug(f"Next Item: {next_item.series_name if next_item else 'None'}")
+    logger.debug("=" * 60)
 
     return jsonify(debug_info)
 
@@ -3923,8 +3597,6 @@ def debug_queue():
 @app.route('/api/queue/max-concurrent', methods=['GET', 'POST'])
 def manage_max_concurrent():
     """Get or set max concurrent downloads"""
-    global MAX_PARALLEL_DOWNLOADS
-
     # Get the configurable limit
     max_limit = queue_processor.get_max_limit()
 
@@ -3946,12 +3618,10 @@ def manage_max_concurrent():
         return jsonify({'error': f'max_concurrent must be an integer between 1 and {max_limit}'}), 400
 
     old_max = queue_processor.max_parallel
-    MAX_PARALLEL_DOWNLOADS = new_max
-
     # Update the robust processor
     queue_processor.set_max_parallel(new_max)
 
-    print(f"⚙️ Max concurrent downloads changed: {old_max} → {new_max} (limit: {max_limit})")
+    logger.info(f"Max concurrent downloads changed: {old_max} -> {new_max} (limit: {max_limit})")
 
     return jsonify({
         'message': f'Max concurrent downloads updated to {new_max}',
@@ -4200,7 +3870,7 @@ def remove_queue_item(session_id):
     success = queue_manager.remove_item(session_id)
 
     if success:
-        print(f"🗑️ Removed queue item: {session_id[:8]}...")
+        logger.info(f"Removed queue item: {session_id[:8]}...")
         return jsonify({'status': 'removed', 'session_id': session_id})
 
     return jsonify({'error': 'Session not found'}), 404
@@ -4253,7 +3923,7 @@ def add_series_to_queue():
         'quality': 'best',
         'format': app_config.DEFAULT_FORMAT,
         'wait': app_config.DEFAULT_WAIT_TIME,
-        'parallel': MAX_PARALLEL_DOWNLOADS,  # Use global parallel setting
+        'parallel': queue_processor.max_parallel,  # Use queue processor setting
         'series_display': series_name,
         'english_title': False,
         'adblock': True,
@@ -4291,50 +3961,22 @@ def add_series_to_queue():
     # Ensure queue processor is running
     start_queue_processor()
 
-    print(f"📥 Added to queue: {series_name} (will auto-download ALL seasons and episodes)")
-    print(f"   Session ID: {session_id}")
-    print(f"   URL: {url}")
-    print(f"   Options:")
-    print(f"      - seasons: {options['seasons']}")
-    print(f"      - episodes: {options['episodes']}")
-    print(f"      - parallel: {options['parallel']}")
-    print(f"      - download_path: {Config.get_download_path()}")
-    print(f"      - quality: {options['quality']}")
-    print(f"      - format: {options['format']}")
+    logger.info(f"Added to queue: {series_name} (will auto-download ALL seasons and episodes)")
+    logger.debug(f"Session ID: {session_id}")
+    logger.debug(f"URL: {url}")
+    logger.debug(f"Options:")
+    logger.debug(f"  - seasons: {options['seasons']}")
+    logger.debug(f"  - episodes: {options['episodes']}")
+    logger.debug(f"  - parallel: {options['parallel']}")
+    logger.debug(f"  - download_path: {Config.get_download_path()}")
+    logger.debug(f"  - quality: {options['quality']}")
+    logger.debug(f"  - format: {options['format']}")
 
     return jsonify({
         'session_id': session_id,
         'status': 'queued',
         'series_name': series_name
     })
-
-
-@app.route('/api/queue/<session_id>/pause', methods=['POST'])
-def pause_download_endpoint(session_id):
-    """Pause a download"""
-    success = queue_manager.pause_download(session_id)
-    if success:
-        # Update active_downloads
-        if session_id in active_downloads:
-            active_downloads[session_id]['status'] = 'paused'
-        return jsonify({'status': 'paused', 'session_id': session_id})
-    return jsonify({'error': 'Failed to pause download'}), 400
-
-
-@app.route('/api/queue/<session_id>/resume', methods=['POST'])
-def resume_download_endpoint(session_id):
-    """Resume a paused download"""
-    success = queue_manager.resume_download(session_id)
-    if success:
-        # Update active_downloads
-        if session_id in active_downloads:
-            active_downloads[session_id]['status'] = 'queued'
-
-        # Ensure queue processor is running
-        start_queue_processor()
-
-        return jsonify({'status': 'resumed', 'session_id': session_id})
-    return jsonify({'error': 'Failed to resume download'}), 400
 
 
 @app.route('/api/queue/<session_id>/priority', methods=['POST'])
@@ -4368,65 +4010,6 @@ def set_priority_endpoint(session_id):
             'priority_name': priority.name
         })
     return jsonify({'error': 'Failed to set priority'}), 400
-
-
-@app.route('/api/queue/<session_id>/bandwidth', methods=['POST'])
-def set_bandwidth_endpoint(session_id):
-    """
-    Set bandwidth limit
-
-    Request body:
-    {
-        "max_rate_kbps": 1024  (or null for unlimited)
-    }
-    """
-    data = request.json
-    if not data or 'max_rate_kbps' not in data:
-        return jsonify({'error': 'max_rate_kbps required'}), 400
-
-    max_rate = data['max_rate_kbps']
-    if max_rate is not None:
-        try:
-            max_rate = int(max_rate)
-            if max_rate <= 0:
-                return jsonify({'error': 'max_rate_kbps must be positive or null'}), 400
-        except ValueError:
-            return jsonify({'error': 'Invalid max_rate_kbps value'}), 400
-
-    success = queue_manager.set_bandwidth_limit(session_id, max_rate)
-    if success:
-        return jsonify({
-            'status': 'bandwidth_updated',
-            'session_id': session_id,
-            'max_rate_kbps': max_rate
-        })
-    return jsonify({'error': 'Failed to set bandwidth limit'}), 400
-
-
-@app.route('/api/queue/<session_id>/reschedule', methods=['POST'])
-def reschedule_endpoint(session_id):
-    """
-    Reschedule download
-
-    Request body:
-    {
-        "scheduled_start": "2024-12-25T02:00:00"  (ISO timestamp)
-    }
-    """
-    data = request.json
-    if not data or 'scheduled_start' not in data:
-        return jsonify({'error': 'scheduled_start required'}), 400
-
-    new_start_time = data['scheduled_start']
-    success = queue_manager.reschedule_download(session_id, new_start_time)
-
-    if success:
-        return jsonify({
-            'status': 'rescheduled',
-            'session_id': session_id,
-            'scheduled_start': new_start_time
-        })
-    return jsonify({'error': 'Failed to reschedule download'}), 400
 
 
 @app.route('/api/queue/reorder', methods=['POST'])
@@ -4681,14 +4264,14 @@ def reorder_episodes_endpoint(session_id):
 @socketio.on('connect')
 def handle_connect():
     """Handle client connection"""
-    print('Client connected')
+    logger.info('Client connected')
     emit('connected', {'status': 'Connected to HLS Downloader'})
 
 
 @socketio.on('disconnect')
 def handle_disconnect():
     """Handle client disconnection"""
-    print('Client disconnected')
+    logger.info('Client disconnected')
     pass
 
 
@@ -4697,11 +4280,11 @@ def handle_disconnect():
 # ==========================================
 
 if __name__ == '__main__':
-    print("=" * 70)
-    print("HLS Video Downloader - Web GUI")
-    print("=" * 70)
-    print("\n🌐 Starting web server...")
-    print("📍 Open your browser and go to: http://localhost:5000")
-    print("🛑 Press Ctrl+C to stop\n")
+    logger.info("=" * 70)
+    logger.info("HLS Video Downloader - Web GUI")
+    logger.info("=" * 70)
+    logger.info("Starting web server...")
+    logger.info("Open your browser and go to: http://localhost:5000")
+    logger.info("Press Ctrl+C to stop")
 
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)

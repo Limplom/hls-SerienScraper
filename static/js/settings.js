@@ -197,6 +197,53 @@ async function testDownloadPath() {
     }
 }
 
+// Restart server
+async function restartServer() {
+    if (!confirm('Are you sure you want to restart the server? All active downloads will be interrupted.')) {
+        return;
+    }
+
+    try {
+        showNotification('🔄 Restarting server...', 'info');
+
+        const response = await fetch('/api/settings/restart', {
+            method: 'POST'
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            showNotification('🔄 Server is restarting... Page will reload automatically.', 'success');
+
+            // Poll until server is back up, then reload
+            const checkServer = setInterval(async () => {
+                try {
+                    const res = await fetch('/api/settings/save', {
+                        method: 'HEAD',
+                        signal: AbortSignal.timeout(2000)
+                    });
+                    // Server is back
+                    clearInterval(checkServer);
+                    window.location.reload();
+                } catch (e) {
+                    // Server still restarting
+                }
+            }, 2000);
+
+            // Stop trying after 30 seconds
+            setTimeout(() => {
+                clearInterval(checkServer);
+                showNotification('⚠️ Server may still be restarting. Please reload manually.', 'error');
+            }, 30000);
+        } else {
+            showNotification('❌ Error restarting server: ' + (result.error || 'Unknown error'), 'error');
+        }
+    } catch (error) {
+        console.error('Error restarting server:', error);
+        showNotification('❌ Failed to restart server: ' + error.message, 'error');
+    }
+}
+
 // Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
     // Ctrl+S or Cmd+S to save

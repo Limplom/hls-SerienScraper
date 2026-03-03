@@ -5,10 +5,13 @@ Validates downloaded video files for integrity and completeness
 import os
 import subprocess
 import json
+import logging
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -261,25 +264,25 @@ if __name__ == '__main__':
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python file_verification.py <video_file>")
+        logger.info("Usage: python file_verification.py <video_file>")
         sys.exit(1)
 
     verifier = FileVerifier()
     result = verifier.verify_file(sys.argv[1])
 
-    print(f"File: {result.file_path}")
-    print(f"Valid: {'✅ Yes' if result.is_valid else '❌ No'}")
-    print(f"Size: {format_file_size(result.file_size)}")
+    logger.info(f"File: {result.file_path}")
+    logger.info(f"Valid: {'Yes' if result.is_valid else 'No'}")
+    logger.info(f"Size: {format_file_size(result.file_size)}")
 
     if result.duration:
-        print(f"Duration: {format_duration(result.duration)}")
+        logger.info(f"Duration: {format_duration(result.duration)}")
     if result.format:
-        print(f"Format: {result.format}")
+        logger.info(f"Format: {result.format}")
     if result.video_codec:
-        print(f"Video Codec: {result.video_codec}")
+        logger.info(f"Video Codec: {result.video_codec}")
     if result.audio_codec:
-        print(f"Audio Codec: {result.audio_codec}")
+        logger.info(f"Audio Codec: {result.audio_codec}")
     if result.resolution:
-        print(f"Resolution: {result.resolution}")
+        logger.info(f"Resolution: {result.resolution}")
     if result.error:
-        print(f"Error: {result.error}")
+        logger.error(f"Error: {result.error}")

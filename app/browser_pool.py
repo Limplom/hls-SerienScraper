@@ -10,10 +10,13 @@ Optimized for:
 """
 
 import asyncio
+import logging
 from typing import List, Optional
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 from app.config import Config
+
+logger = logging.getLogger(__name__)
 
 
 # Optimized browser launch arguments for speed and stability
@@ -87,7 +90,7 @@ class BrowserPool:
         if self._initialized:
             return
 
-        print(f"🏊 Initializing browser pool ({self.pool_size} contexts)...")
+        logger.info(f"Initializing browser pool ({self.pool_size} contexts)...")
 
         try:
             self.playwright = await async_playwright().start()
@@ -106,10 +109,10 @@ class BrowserPool:
                 self._context_use_count[id(context)] = 0
 
             self._initialized = True
-            print(f"✅ Browser pool ready ({self.pool_size} contexts)")
+            logger.info(f"Browser pool ready ({self.pool_size} contexts)")
 
         except Exception as e:
-            print(f"❌ Failed to initialize browser pool: {e}")
+            logger.error(f"Failed to initialize browser pool: {e}")
             await self.close()
             raise
 
@@ -162,7 +165,7 @@ class BrowserPool:
 
                 if self._context_use_count[ctx_id] >= self._max_context_uses:
                     # Recycle old context
-                    print(f"♻️ Recycling browser context after {self._max_context_uses} uses")
+                    logger.debug(f"Recycling browser context after {self._max_context_uses} uses")
                     try:
                         await context.close()
                     except:
@@ -183,7 +186,7 @@ class BrowserPool:
             return context
 
         except asyncio.TimeoutError:
-            print(f"⚠️ Timeout waiting for browser context")
+            logger.warning("Timeout waiting for browser context")
             # Try to create emergency context
             if self.browser and not self.browser.is_connected():
                 await self.initialize()
@@ -209,7 +212,7 @@ class BrowserPool:
 
         except Exception as e:
             # Context might be corrupted, try to recover
-            print(f"⚠️ Error clearing context, attempting recovery: {e}")
+            logger.warning(f"Error clearing context, attempting recovery: {e}")
             try:
                 idx = self.contexts.index(context) if context in self.contexts else 0
                 await context.close()
@@ -232,7 +235,7 @@ class BrowserPool:
         if not self._initialized:
             return
 
-        print("🔄 Closing browser pool...")
+        logger.info("Closing browser pool...")
 
         # Close all contexts
         for context in self.contexts:
@@ -258,7 +261,7 @@ class BrowserPool:
         self.contexts.clear()
         self._context_use_count.clear()
         self._initialized = False
-        print("✅ Browser pool closed")
+        logger.info("Browser pool closed")
 
     async def __aenter__(self):
         """Context manager entry"""

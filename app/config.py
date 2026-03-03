@@ -4,7 +4,10 @@ Supports environment variables for Docker deployment.
 """
 import os
 import json
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Optional: load .env file if python-dotenv is installed
 try:
@@ -25,7 +28,7 @@ def _load_settings_json():
             with open(settings_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
-            print(f"⚠️ Error loading settings.json: {e}")
+            logger.warning(f"Error loading settings.json: {e}")
     return {}
 
 # Load JSON settings
@@ -34,7 +37,7 @@ _json_settings = _load_settings_json()
 
 class Config:
     """Base configuration"""
-    SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+    SECRET_KEY = os.getenv('SECRET_KEY', os.urandom(24).hex())
 
     # ===========================================
     # DOWNLOAD SETTINGS (from settings.json or env)
@@ -52,8 +55,6 @@ class Config:
         # Ensure directory exists
         Path(path).mkdir(parents=True, exist_ok=True)
         return path
-
-    DOWNLOAD_PATH = property(lambda self: Config.get_download_path())
 
     # Max parallel downloads - absolute maximum allowed (hard limit)
     MAX_PARALLEL_LIMIT = int(os.getenv(
@@ -189,8 +190,6 @@ class ProductionConfig(Config):
 class TestingConfig(Config):
     """Testing configuration"""
     TESTING = True
-    SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
-    WTF_CSRF_ENABLED = False
 
 
 config = {

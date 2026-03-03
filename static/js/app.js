@@ -311,8 +311,8 @@ function initializeWebSocket() {
             updateDownloadProgress(data);
         }
 
-        // Update queue item with download percentage
-        updateQueueItemDownloadProgress(data.session_id, data.percent);
+        // Update queue item with download percentage and speed
+        updateQueueItemDownloadProgress(data.session_id, data.percent, data.speed);
     });
 
     // Handler for aggregated progress during parallel downloads
@@ -542,6 +542,13 @@ async function startDownload() {
                 addLog('🚀 Download added to queue!', 'success');
             }
 
+            // Clear selections after successful download start
+            selectedEpisodesPerSeason = {};
+            document.querySelectorAll('.episode-btn.selected').forEach(btn => {
+                btn.classList.remove('selected');
+            });
+            updateDownloadSummary();
+
             // Start queue polling to get real-time updates
             startQueuePolling();
 
@@ -676,10 +683,14 @@ function updateDownloadProgress(data) {
 
     // Extract episode number (e.g., "S01E05" from current text)
     const episodeMatch = currentText.match(/S\d+E\d+/);
+    let progressStr = `${data.percent.toFixed(1)}%`;
+    if (data.speed) {
+        progressStr += ` (${data.speed})`;
+    }
     if (episodeMatch) {
-        currentEpisodeEl.textContent = `${episodeMatch[0]} - ${data.percent.toFixed(1)}%`;
+        currentEpisodeEl.textContent = `${episodeMatch[0]} - ${progressStr}`;
     } else {
-        currentEpisodeEl.textContent = `Downloading... ${data.percent.toFixed(1)}%`;
+        currentEpisodeEl.textContent = `Downloading... ${progressStr}`;
     }
 }
 
@@ -1134,6 +1145,9 @@ async function parseURLManually() {
         showToast('Please enter a valid URL!', 'warning');
         return;
     }
+
+    // Clear previous selections when parsing a new URL
+    selectedEpisodesPerSeason = {};
 
     // Show loading indicator
     showParsingIndicator();
@@ -2235,7 +2249,7 @@ function updateEpisodesIncremental(shortSessionId, fullSessionId, episodeStatus)
 
     // Check if we need to add new episode rows
     const existingRows = episodeContainer.querySelectorAll('.episode-row');
-    const existingKeys = new Set(Array.from(existingRows).map(r => r.dataset.episodeKey));
+    const existingKeys = new Set(Array.from(existingRows).map(r => r.dataset.episode));
     const newKeys = new Set(episodes.map(([key]) => key));
 
     // If structure changed, do full episode re-render
@@ -2247,15 +2261,15 @@ function updateEpisodesIncremental(shortSessionId, fullSessionId, episodeStatus)
 
     // Update each episode row
     episodes.forEach(([episodeKey, status]) => {
-        const row = episodeContainer.querySelector(`.episode-row[data-episode-key="${episodeKey}"]`);
+        const row = episodeContainer.querySelector(`.episode-row[data-episode="${episodeKey}"]`);
         if (!row) return;
 
         const epStatus = status.status || 'queued';
         const progress = status.progress || 0;
 
         // Update status class
-        row.className = row.className.replace(/status-\w+/g, '');
-        row.classList.add(`status-${epStatus}`);
+        const oldClasses = Array.from(row.classList).filter(c => !c.startsWith('episode-status-'));
+        row.className = [...oldClasses, `episode-status-${epStatus}`].join(' ');
 
         // Update status icon
         const iconEl = row.querySelector('.episode-status-icon');
@@ -2269,9 +2283,10 @@ function updateEpisodesIncremental(shortSessionId, fullSessionId, episodeStatus)
             progressFill.style.width = `${progress}%`;
         }
 
-        // Update progress text
+        // Update progress text — skip for actively downloading episodes
+        // (real-time WebSocket updates handle those to avoid flickering)
         const progressText = row.querySelector('.episode-progress-text');
-        if (progressText) {
+        if (progressText && epStatus !== 'downloading') {
             progressText.textContent = `${Math.round(progress)}%`;
         }
 
@@ -2466,7 +2481,7 @@ function updateQueueItemProgress(sessionId, current, total) {
 }
 
 // Update download card with download percentage (FFmpeg progress)
-function updateQueueItemDownloadProgress(sessionId, percent) {
+function updateQueueItemDownloadProgress(sessionId, percent, speed) {
     // Use cached card lookup for better performance
     const card = findDownloadCard(sessionId);
     if (!card) return;
@@ -2489,8 +2504,12 @@ function updateQueueItemDownloadProgress(sessionId, percent) {
         }
     }
 
-    // Single episode - show exact percentage in text
-    progressText.textContent = `${baseText} - Downloading ${percent.toFixed(1)}%`;
+    // Single episode - show exact percentage and speed in text
+    let dlText = `${baseText} - Downloading ${percent.toFixed(1)}%`;
+    if (speed) {
+        dlText += ` (${speed})`;
+    }
+    progressText.textContent = dlText;
 
     // IMPORTANT: Also update the progress bar fill for single episodes!
     const progressFill = card.querySelector('.download-series-progress .download-progress-fill') ||

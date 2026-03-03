@@ -12,8 +12,10 @@ from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
-# Cache configuration
-CACHE_DIR = Path("./series_cache")
+from app.config import PROJECT_ROOT
+
+# Cache configuration - use PROJECT_ROOT for consistent paths regardless of CWD
+CACHE_DIR = PROJECT_ROOT / "series_cache"
 CACHE_EXPIRY_DAYS = 7
 
 # Ensure cache directory exists on module load
@@ -113,7 +115,7 @@ def save_to_cache(series_slug: str, data: Dict[str, Any]) -> bool:
 
         return True
     except Exception as e:
-        print(f"Error saving cache for {series_slug}: {e}")
+        logger.error(f"Error saving cache for {series_slug}: {e}")
         return False
 
 
@@ -148,7 +150,7 @@ def clear_cache(series_slug: Optional[str] = None) -> int:
                 except Exception:
                     pass
     except Exception as e:
-        print(f"Error clearing cache: {e}")
+        logger.error(f"Error clearing cache: {e}")
 
     return deleted_count
 
@@ -182,7 +184,7 @@ def cleanup_expired_cache() -> int:
                 except Exception:
                     pass
     except Exception as e:
-        print(f"Error cleaning up cache: {e}")
+        logger.error(f"Error cleaning up cache: {e}")
 
     return deleted_count
 
@@ -364,14 +366,14 @@ def get_series_needing_update(limit: int = 10, min_age_days: float = 5.0, includ
                 })
 
         if skipped_completed > 0:
-            print(f"ℹ️ Skipped {skipped_completed} completed series (no new episodes expected)")
+            logger.info(f"Skipped {skipped_completed} completed series (no new episodes expected)")
 
         # Sort by priority (highest first) and return top N
         candidates.sort(key=lambda x: x['priority_score'], reverse=True)
         return candidates[:limit]
 
     except Exception as e:
-        print(f"Error getting series needing update: {e}")
+        logger.error(f"Error getting series needing update: {e}")
         return []
 
 
@@ -421,5 +423,5 @@ def get_uncached_series_from_catalog() -> List[str]:
         return uncached
 
     except Exception as e:
-        print(f"Error finding uncached series: {e}")
+        logger.error(f"Error finding uncached series: {e}")
         return []

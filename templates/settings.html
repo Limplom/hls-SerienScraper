@@ -275,10 +275,14 @@
                     <button type="button" class="btn-secondary" onclick="testDownloadPath()">
                         🧪 Test Download Path
                     </button>
+                    <button type="button" class="btn-danger" onclick="restartServer()">
+                        🔄 Restart Server
+                    </button>
                 </div>
 
                 <div class="restart-notice" id="restartNotice" style="display: none;">
                     ⚠️ Some settings require an application restart to take effect.
+                    <button type="button" class="btn-restart-inline" onclick="restartServer()">Restart Now</button>
                 </div>
             </form>
         </main>

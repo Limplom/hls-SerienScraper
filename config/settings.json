@@ -14,7 +14,7 @@
         "ttl_metadata_days": 21,
         "ttl_cover_images_days": 91
     },
-    "download_path": "./Downloads",
+    "download_path": "/mnt/Media-NAS/shows",
     "max_parallel_downloads": 10,
     "default_format": "mkv",
     "default_quality": "1080p",

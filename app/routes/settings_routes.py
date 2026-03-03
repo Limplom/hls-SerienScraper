@@ -5,9 +5,12 @@ Handles settings page and settings API endpoints
 from flask import Blueprint, render_template, request, jsonify
 import json
 import os
+import sys
+import logging
 from pathlib import Path
 import traceback
 
+logger = logging.getLogger(__name__)
 
 settings_bp = Blueprint('settings', __name__)
 
@@ -24,7 +27,7 @@ def settings_page():
             with open(settings_file, 'r', encoding='utf-8') as f:
                 current_settings = json.load(f)
         except Exception as e:
-            print(f"⚠️ Error loading settings: {e}")
+            logger.warning(f"Error loading settings: {e}")
             current_settings = {}
     else:
         current_settings = {}
@@ -32,11 +35,11 @@ def settings_page():
     # Provide defaults for any missing values
     settings_data = {
         'download_path': current_settings.get('download_path', './Downloads'),
-        'max_parallel_limit': current_settings.get('max_parallel_limit', 25),
-        'max_parallel_downloads': current_settings.get('max_parallel_downloads', 10),
+        'max_parallel_limit': current_settings.get('max_parallel_limit', 10),
+        'max_parallel_downloads': current_settings.get('max_parallel_downloads', 3),
         'default_format': current_settings.get('default_format', 'mkv'),
         'default_quality': current_settings.get('default_quality', '1080p'),
-        'default_wait_time': current_settings.get('default_wait_time', 45),
+        'default_wait_time': current_settings.get('default_wait_time', 60),
         'audio_only': current_settings.get('audio_only', False),
         'verify_downloads': current_settings.get('verify_downloads', True),
         'browser_max_context_uses': current_settings.get('browser_max_context_uses', 75),
@@ -87,7 +90,7 @@ def save_settings():
         with open(settings_file, 'w', encoding='utf-8') as f:
             json.dump(new_settings, f, indent=4, ensure_ascii=False)
 
-        print(f"✅ Settings saved to {settings_file}")
+        logger.info(f"Settings saved to {settings_file}")
 
         return jsonify({
             'success': True,
@@ -95,7 +98,7 @@ def save_settings():
         })
 
     except Exception as e:
-        print(f"❌ Error saving settings: {e}")
+        logger.error(f"Error saving settings: {e}")
         traceback.print_exc()
         return jsonify({
             'success': False,
@@ -111,11 +114,11 @@ def reset_settings():
 
         default_settings = {
             "download_path": "./Downloads",
-            "max_parallel_limit": 25,
-            "max_parallel_downloads": 10,
+            "max_parallel_limit": 10,
+            "max_parallel_downloads": 3,
             "default_format": "mkv",
             "default_quality": "1080p",
-            "default_wait_time": 45,
+            "default_wait_time": 60,
             "audio_only": False,
             "verify_downloads": True,
             "browser_max_context_uses": 75,
@@ -145,7 +148,7 @@ def reset_settings():
         with open(settings_file, 'w', encoding='utf-8') as f:
             json.dump(default_settings, f, indent=4, ensure_ascii=False)
 
-        print(f"✅ Settings reset to defaults")
+        logger.info("Settings reset to defaults")
 
         return jsonify({
             'success': True,
@@ -153,7 +156,59 @@ def reset_settings():
         })
 
     except Exception as e:
-        print(f"❌ Error resetting settings: {e}")
+        logger.error(f"Error resetting settings: {e}")
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@settings_bp.route('/api/settings/restart', methods=['POST'])
+def restart_server():
+    """Restart the server process"""
+    try:
+        logger.info("Server restart requested via settings")
+
+        import subprocess
+        import signal
+
+        # Save queue state before restart
+        from app.web_gui import queue_manager
+        queue_manager.save_queue()
+
+        # Spawn a child process that waits for us to die, then starts the server again
+        # The child is detached so it survives our exit
+        restart_script = (
+            f'import time, subprocess, sys; '
+            f'time.sleep(2); '  # Wait for old process to fully exit
+            f'subprocess.Popen(["{sys.executable}"] + {sys.argv})'
+        )
+        subprocess.Popen(
+            [sys.executable, '-c', restart_script],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        # Schedule self-termination after response is sent
+        import threading
+
+        def do_shutdown():
+            import time
+            time.sleep(0.5)
+            logger.info("Shutting down for restart...")
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        threading.Thread(target=do_shutdown, daemon=True).start()
+
+        return jsonify({
+            'success': True,
+            'message': 'Server is restarting...'
+        })
+
+    except Exception as e:
+        logger.error(f"Error restarting server: {e}")
         traceback.print_exc()
         return jsonify({
             'success': False,

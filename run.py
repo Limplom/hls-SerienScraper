@@ -5,10 +5,19 @@ Run this file to start the web GUI in development mode.
 """
 import sys
 import os
+import logging
 
 # IMPORTANT: Disable output buffering FIRST (before any other imports)
 # This ensures print() output from threads is displayed immediately
 os.environ['PYTHONUNBUFFERED'] = '1'
+
+# Configure logging for all modules
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%H:%M:%S'
+)
 
 # Fix Windows console encoding for emoji support
 if sys.platform == 'win32':

@@ -4,12 +4,15 @@ Manages download queue with persistence and retry functionality
 """
 
 import json
+import logging
 import re
 from pathlib import Path
 from datetime import datetime
 from enum import Enum
 import threading
 from typing import Optional, Dict, Any, List
+
+logger = logging.getLogger(__name__)
 
 
 class DownloadStatus(Enum):
@@ -166,7 +169,7 @@ class DownloadQueueManager:
             if max_download_rate:
                 status_msg += f" [Max Rate: {max_download_rate} KB/s]"
 
-            print(status_msg)
+            logger.info(status_msg)
             return item
 
     def find_existing_series(self, url: str) -> Optional[QueueItem]:
@@ -275,15 +278,15 @@ class DownloadQueueManager:
                             if ep not in item.pending_merged_episodes[season]:
                                 item.pending_merged_episodes[season].append(ep)
 
-                print(f"⏳ {len(added_episodes)} episodes queued as pending (download in progress)")
+                logger.info(f"{len(added_episodes)} episodes queued as pending (download in progress)")
 
             self.save_queue()
 
-            print(f"🔗 Merged {len(added_episodes)} episodes into {item.series_name} (Session: {session_id})")
+            logger.info(f"Merged {len(added_episodes)} episodes into {item.series_name} (Session: {session_id})")
             if added_episodes:
-                print(f"   Added: {', '.join(added_episodes)}")
+                logger.debug(f"Added: {', '.join(added_episodes)}")
             if already_exists:
-                print(f"   Already existed: {', '.join(already_exists)}")
+                logger.debug(f"Already existed: {', '.join(already_exists)}")
 
             return {
                 'success': True,
@@ -376,10 +379,10 @@ class DownloadQueueManager:
 
             self.save_queue()
 
-            print(f"🔗 Consolidated {len(items_to_remove) + 1} entries for {primary_item.series_name}")
-            print(f"   Primary session: {primary_item.session_id[:8]}...")
-            print(f"   Removed sessions: {', '.join(removed_sessions)}")
-            print(f"   Merged episodes: {', '.join(merged_episodes) if merged_episodes else 'None (all existed)'}")
+            logger.info(f"Consolidated {len(items_to_remove) + 1} entries for {primary_item.series_name}")
+            logger.debug(f"Primary session: {primary_item.session_id[:8]}...")
+            logger.debug(f"Removed sessions: {', '.join(removed_sessions)}")
+            logger.debug(f"Merged episodes: {', '.join(merged_episodes) if merged_episodes else 'None (all existed)'}")
 
             return {
                 'success': True,
@@ -564,7 +567,7 @@ class DownloadQueueManager:
             self.queue.append(retry_item)
             self.save_queue()
 
-            print(f"🔄 Retry queued: {len(original.failed_episodes)} failed episodes from {original.series_name}")
+            logger.info(f"Retry queued: {len(original.failed_episodes)} failed episodes from {original.series_name}")
             return retry_item
 
     def remove_item(self, session_id: str) -> bool:
@@ -593,7 +596,7 @@ class DownloadQueueManager:
 
             if removed_count > 0:
                 self.save_queue()
-                print(f"🗑️ Cleared {removed_count} old downloads")
+                logger.info(f"Cleared {removed_count} old downloads")
 
             return removed_count
 
@@ -606,12 +609,12 @@ class DownloadQueueManager:
                 encoding='utf-8'
             )
         except Exception as e:
-            print(f"⚠️ Error saving queue: {e}")
+            logger.warning(f"Error saving queue: {e}")
 
     def load_queue(self):
         """Load queue from file"""
         if not self.persist_path.exists():
-            print("📂 No existing queue file found, starting with empty queue")
+            logger.info("No existing queue file found, starting with empty queue")
             return
 
         try:
@@ -619,27 +622,27 @@ class DownloadQueueManager:
 
             # Check if file is empty
             if not file_content.strip():
-                print("⚠️ Queue file is empty, starting with empty queue")
+                logger.warning("Queue file is empty, starting with empty queue")
                 self.queue = []
                 return
 
             data = json.loads(file_content)
             self.queue = [QueueItem.from_dict(item_data) for item_data in data]
-            print(f"📂 Loaded {len(self.queue)} items from queue")
+            logger.info(f"Loaded {len(self.queue)} items from queue")
         except json.JSONDecodeError as e:
-            print(f"❌ Queue file is corrupted (JSON decode error): {e}")
+            logger.error(f"Queue file is corrupted (JSON decode error): {e}")
             # Backup corrupted file
             backup_path = self.persist_path.with_suffix('.json.backup')
             try:
                 import shutil
                 shutil.copy(self.persist_path, backup_path)
-                print(f"💾 Corrupted queue backed up to: {backup_path}")
+                logger.info(f"Corrupted queue backed up to: {backup_path}")
             except:
                 pass
-            print("🔄 Starting with empty queue")
+            logger.info("Starting with empty queue")
             self.queue = []
         except Exception as e:
-            print(f"⚠️ Error loading queue: {e}")
+            logger.warning(f"Error loading queue: {e}")
             self.queue = []
 
     def get_queue_status(self) -> Dict[str, Any]:
@@ -649,8 +652,6 @@ class DownloadQueueManager:
                 'total': len(self.queue),
                 'queued': sum(1 for i in self.queue if i.status == DownloadStatus.QUEUED),
                 'processing': sum(1 for i in self.queue if i.status == DownloadStatus.PROCESSING),
-                'paused': sum(1 for i in self.queue if i.status == DownloadStatus.PAUSED),
-                'scheduled': sum(1 for i in self.queue if i.status == DownloadStatus.SCHEDULED),
                 'completed': sum(1 for i in self.queue if i.status == DownloadStatus.COMPLETED),
                 'failed': sum(1 for i in self.queue if i.status == DownloadStatus.FAILED),
                 'cancelled': sum(1 for i in self.queue if i.status == DownloadStatus.CANCELLED),
@@ -668,9 +669,6 @@ class DownloadQueueManager:
             'created_at': item.created_at,
             'started_at': item.started_at,
             'completed_at': item.completed_at,
-            'paused_at': item.paused_at,
-            'scheduled_start': item.scheduled_start,
-            'max_download_rate': item.max_download_rate,
             'total_episodes': item.total_episodes,
             'completed_episodes': item.completed_episodes,
             'failed_episodes_count': len(item.failed_episodes),
@@ -691,60 +689,9 @@ class DownloadQueueManager:
     # NEW: Advanced Queue Management Features
     # ==========================================
 
-    def pause_download(self, session_id: str) -> bool:
-        """
-        Pause a download (works for QUEUED or PROCESSING status)
-
-        Returns:
-            True if paused successfully, False otherwise
-        """
-        with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    if item.status in [DownloadStatus.QUEUED, DownloadStatus.PROCESSING]:
-                        item.status = DownloadStatus.PAUSED
-                        item.paused_at = datetime.now().isoformat()
-                        self.save_queue()
-                        print(f"⏸️ Paused: {item.series_name}")
-                        return True
-                    else:
-                        print(f"⚠️ Cannot pause {item.series_name} - status: {item.status.value}")
-                        return False
-        return False
-
-    def resume_download(self, session_id: str) -> bool:
-        """
-        Resume a paused download
-
-        Returns:
-            True if resumed successfully, False otherwise
-        """
-        with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    if item.status == DownloadStatus.PAUSED:
-                        # Check if it's scheduled
-                        if item.scheduled_start:
-                            scheduled_time = datetime.fromisoformat(item.scheduled_start)
-                            if scheduled_time > datetime.now():
-                                item.status = DownloadStatus.SCHEDULED
-                            else:
-                                item.status = DownloadStatus.QUEUED
-                        else:
-                            item.status = DownloadStatus.QUEUED
-
-                        item.paused_at = None
-                        self.save_queue()
-                        print(f"▶️ Resumed: {item.series_name}")
-                        return True
-                    else:
-                        print(f"⚠️ Cannot resume {item.series_name} - status: {item.status.value}")
-                        return False
-        return False
-
     def set_priority(self, session_id: str, priority: DownloadPriority) -> bool:
         """
-        Change priority of a queued/scheduled download
+        Change priority of a queued download
 
         Args:
             session_id: Session ID
@@ -756,87 +703,16 @@ class DownloadQueueManager:
         with self.lock:
             for item in self.queue:
                 if item.session_id == session_id:
-                    if item.status in [DownloadStatus.QUEUED, DownloadStatus.SCHEDULED, DownloadStatus.PAUSED]:
+                    if item.status == DownloadStatus.QUEUED:
                         old_priority = item.priority
                         item.priority = priority
                         self.save_queue()
-                        print(f"🎯 Priority changed: {item.series_name} ({old_priority.name} → {priority.name})")
+                        logger.info(f"Priority changed: {item.series_name} ({old_priority.name} -> {priority.name})")
                         return True
                     else:
-                        print(f"⚠️ Cannot change priority for {item.series_name} - status: {item.status.value}")
+                        logger.warning(f"Cannot change priority for {item.series_name} - status: {item.status.value}")
                         return False
         return False
-
-    def set_bandwidth_limit(self, session_id: str, max_rate_kbps: Optional[int]) -> bool:
-        """
-        Set bandwidth limit for a download
-
-        Args:
-            session_id: Session ID
-            max_rate_kbps: Max download rate in KB/s (None = unlimited)
-
-        Returns:
-            True if limit set, False otherwise
-        """
-        with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    item.max_download_rate = max_rate_kbps
-                    self.save_queue()
-                    if max_rate_kbps:
-                        print(f"📊 Bandwidth limit set: {item.series_name} ({max_rate_kbps} KB/s)")
-                    else:
-                        print(f"📊 Bandwidth limit removed: {item.series_name}")
-                    return True
-        return False
-
-    def reschedule_download(self, session_id: str, new_start_time: str) -> bool:
-        """
-        Reschedule a download to a new time
-
-        Args:
-            session_id: Session ID
-            new_start_time: ISO timestamp for new start time
-
-        Returns:
-            True if rescheduled, False otherwise
-        """
-        with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    if item.status in [DownloadStatus.QUEUED, DownloadStatus.SCHEDULED, DownloadStatus.PAUSED]:
-                        try:
-                            # Validate timestamp
-                            scheduled_time = datetime.fromisoformat(new_start_time)
-
-                            item.scheduled_start = new_start_time
-
-                            # Update status based on time
-                            if scheduled_time > datetime.now():
-                                item.status = DownloadStatus.SCHEDULED
-                            else:
-                                item.status = DownloadStatus.QUEUED
-
-                            self.save_queue()
-                            print(f"📅 Rescheduled: {item.series_name} to {new_start_time}")
-                            return True
-                        except ValueError as e:
-                            print(f"❌ Invalid timestamp format: {e}")
-                            return False
-                    else:
-                        print(f"⚠️ Cannot reschedule {item.series_name} - status: {item.status.value}")
-                        return False
-        return False
-
-    def get_scheduled_downloads(self) -> List[QueueItem]:
-        """Get all scheduled downloads"""
-        with self.lock:
-            return [i for i in self.queue if i.status == DownloadStatus.SCHEDULED]
-
-    def get_paused_downloads(self) -> List[QueueItem]:
-        """Get all paused downloads"""
-        with self.lock:
-            return [i for i in self.queue if i.status == DownloadStatus.PAUSED]
 
     def reorder(self, session_ids: List[str]) -> bool:
         """
@@ -882,7 +758,7 @@ class DownloadQueueManager:
             self.queue = others + new_queued
             self.save_queue()
 
-            print(f"🔀 Queue reordered: {len(new_queued)} items")
+            logger.info(f"Queue reordered: {len(new_queued)} items")
             return True
 
     # ==========================================

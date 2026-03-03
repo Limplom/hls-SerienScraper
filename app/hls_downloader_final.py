@@ -18,7 +18,6 @@ from urllib.parse import urlparse
 import time
 import logging
 from typing import Optional, List, Dict, Any, Tuple, Set
-from concurrent.futures import ThreadPoolExecutor
 
 # Fix Windows console encoding for special characters
 if sys.platform == 'win32':
@@ -35,9 +34,6 @@ except ImportError:
 
 # Setup logging
 logger = logging.getLogger(__name__)
-
-# Global ThreadPoolExecutor for download operations (reused to avoid overhead)
-_DOWNLOAD_EXECUTOR = ThreadPoolExecutor(max_workers=10, thread_name_prefix="HLSDownload")
 
 class VideoMetadata:
     def __init__(self):
@@ -83,7 +79,7 @@ class HLSExtractor:
     
     def load_brave_filters(self):
         """Lädt Brave-kompatible Filterlisten"""
-        filter_cache = Path("./filter_cache")
+        filter_cache = app_config.PROJECT_ROOT / "filter_cache"
         filter_cache.mkdir(exist_ok=True)
 
         # Multiple URLs for redundancy (primary and fallback)
@@ -144,9 +140,9 @@ class HLSExtractor:
                                 # Malformed filter line, skip silently
                                 pass
             except Exception as e:
-                print(f"⚠ Error parsing {name}: {e}")
+                logger.warning(f"Error parsing {name}: {e}")
         
-        print(f"✓ Loaded {len(self.ad_filters)} filter rules")
+        logger.info(f"Loaded {len(self.ad_filters)} filter rules")
         return len(self.ad_filters) > 0
     
     async def close_new_tabs(self, context: BrowserContext, main_page: Page) -> int:
@@ -170,7 +166,7 @@ class HLSExtractor:
     
     async def click_18_plus_popups(self, page, context, phase="initial"):
         """Klickt alle 18+ OK Buttons weg - NUR ECHTE POPUPS!"""
-        print(f"\n🔞 Checking for 18+ popups ({phase})...")
+        logger.info(f"Checking for 18+ popups ({phase})...")
         
         clicked_count = 0
         max_attempts = 10
@@ -216,15 +212,15 @@ class HLSExtractor:
                                             
                                             # Nur echte Confirm-Buttons
                                             if 'ok' in text_lower or 'confirm' in text_lower:
-                                                print(f"  ✓ Found popup in {frame_name}")
-                                                print(f"    Button text: '{text}'")
+                                                logger.info(f"Found popup in {frame_name}")
+                                                logger.debug(f"Button text: '{text}'")
                                                 
                                                 # Click mit extra Vorsicht
                                                 try:
                                                     await button.click(timeout=2000, force=True)
                                                     clicked_count += 1
                                                     found_button = True
-                                                    print(f"  ✓ Clicked popup #{clicked_count}")
+                                                    logger.info(f"Clicked popup #{clicked_count}")
                                                     await asyncio.sleep(2)
                                                     
                                                     # Schließe neue Tabs die durch Click entstanden
@@ -243,16 +239,16 @@ class HLSExtractor:
                 logger.debug(f"Popup check attempt error: {e}")
         
         if clicked_count > 0:
-            print(f"✓ Closed {clicked_count} popup(s) in {phase} phase")
+            logger.info(f"Closed {clicked_count} popup(s) in {phase} phase")
             await asyncio.sleep(2)
         else:
-            print(f"  No popups found in {phase} phase")
+            logger.debug(f"No popups found in {phase} phase")
         
         return clicked_count
     
     async def click_play_button(self, page, context):
         """Klickt den Play-Button - OPTIMIERT mit wait_for_selector"""
-        print("\n▶️  Looking for Play button...")
+        logger.info("Looking for Play button...")
 
         # Scroll um iframe im Viewport zu haben
         try:
@@ -261,7 +257,7 @@ class HLSExtractor:
             logger.debug(f"Scroll failed: {e}")
 
         # OPTIMIERT: Warte auf Video-Frame mit wait_for_selector statt fester 5s
-        print("  Waiting for video iframe to load (smart wait)...")
+        logger.info("Waiting for video iframe to load (smart wait)...")
         video_frame = None
         max_frame_wait = 15000  # 15s timeout (statt feste 5s)
 
@@ -281,7 +277,7 @@ class HLSExtractor:
                         video = await frame.wait_for_selector('video', timeout=2000)
                         if video:
                             elapsed = asyncio.get_event_loop().time() - start_wait
-                            print(f"  ✓ Video iframe found in {elapsed:.1f}s!")
+                            logger.info(f"Video iframe found in {elapsed:.1f}s!")
                             logger.info(f"Found video iframe: {frame.url[:80]}")
                             video_frame = frame
                             break
@@ -296,10 +292,10 @@ class HLSExtractor:
             logger.debug(f"Frame wait error: {e}")
 
         if not video_frame:
-            print("  ⚠ No video iframe found after 15s")
+            logger.warning("No video iframe found after 15s")
             return False
         
-        print("  Trying optimized playback methods...")
+        logger.info("Trying optimized playback methods...")
 
         # ============================================================
         # OPTIMIERT: Prüfe zuerst ob Video bereits spielt (readyState)
@@ -318,9 +314,9 @@ class HLSExtractor:
             """)
             if video_state:
                 if not video_state.get('paused') and video_state.get('currentTime', 0) > 0:
-                    print("  ✓ Video already playing! Skipping play clicks.")
+                    logger.info("Video already playing! Skipping play clicks.")
                     return True
-                print(f"  Video state: paused={video_state.get('paused')}, readyState={video_state.get('readyState')}")
+                logger.debug(f"Video state: paused={video_state.get('paused')}, readyState={video_state.get('readyState')}")
         except Exception as e:
             logger.debug(f"Video state check failed: {e}")
 
@@ -328,7 +324,7 @@ class HLSExtractor:
         # Methode 1: Smart Play-Button Click mit Video-Start-Check
         # ============================================================
         try:
-            print("  → Method 1: Smart play button detection")
+            logger.info("Method 1: Smart play button detection")
 
             # Kombinierter Selector für alle Play-Button Varianten
             play_selectors = [
@@ -348,18 +344,18 @@ class HLSExtractor:
                         timeout=3000
                     )
                     if play_button:
-                        print(f"  ✓ Found play button: {selector}")
+                        logger.info(f"Found play button: {selector}")
 
                         # SMART CLICK: Max 4 Clicks mit Video-Start-Check
                         for click_num in range(1, 5):
                             try:
                                 await play_button.click(timeout=2000, force=True)
-                                print(f"    Click #{click_num}")
+                                logger.debug(f"Click #{click_num}")
 
                                 # Schließe Werbe-Tabs
                                 closed = await self.close_new_tabs(context, page)
                                 if closed > 0:
-                                    print(f"      → Closed {closed} ad tab(s)")
+                                    logger.debug(f"Closed {closed} ad tab(s)")
 
                                 # OPTIMIERT: Prüfe ob Video gestartet hat
                                 try:
@@ -368,7 +364,7 @@ class HLSExtractor:
                                         '() => { const v = document.querySelector("video"); return v && !v.paused && v.currentTime > 0; }',
                                         timeout=3000
                                     )
-                                    print(f"  ✓ Video started playing after {click_num} click(s)!")
+                                    logger.info(f"Video started playing after {click_num} click(s)!")
                                     return True
                                 except Exception:
                                     # Video noch nicht gestartet, nächster Click
@@ -393,7 +389,7 @@ class HLSExtractor:
         # Methode 2: JavaScript video.play() mit readyState check
         # ============================================================
         try:
-            print("  → Method 2: JavaScript play() with readiness check")
+            logger.info("Method 2: JavaScript play() with readiness check")
 
             # Warte bis Video bereit ist (readyState >= 2)
             try:
@@ -401,9 +397,9 @@ class HLSExtractor:
                     '() => { const v = document.querySelector("video"); return v && v.readyState >= 2; }',
                     timeout=5000
                 )
-                print("    Video is ready (readyState >= 2)")
+                logger.debug("Video is ready (readyState >= 2)")
             except Exception:
-                print("    Video not fully ready, trying play() anyway...")
+                logger.debug("Video not fully ready, trying play() anyway...")
 
             result = await video_frame.evaluate("""
                 () => {
@@ -418,7 +414,7 @@ class HLSExtractor:
                 }
             """)
             if result:
-                print("  ✓ Video.play() executed!")
+                logger.info("Video.play() executed!")
                 await self.close_new_tabs(context, page)
 
                 # Kurze Wartezeit für Play-Start
@@ -427,7 +423,7 @@ class HLSExtractor:
                         '() => { const v = document.querySelector("video"); return v && !v.paused; }',
                         timeout=3000
                     )
-                    print("  ✓ Video is now playing!")
+                    logger.info("Video is now playing!")
                     return True
                 except Exception:
                     pass
@@ -438,7 +434,7 @@ class HLSExtractor:
         # Methode 3: Klicke direkt auf Video-Element
         # ============================================================
         try:
-            print("  → Method 3: Direct video click")
+            logger.info("Method 3: Direct video click")
             video = await video_frame.query_selector('video')
             if video:
                 await video.click(timeout=3000, force=True)
@@ -450,14 +446,14 @@ class HLSExtractor:
                         '() => { const v = document.querySelector("video"); return v && !v.paused; }',
                         timeout=3000
                     )
-                    print("  ✓ Video started via direct click!")
+                    logger.info("Video started via direct click!")
                     return True
                 except Exception:
                     pass
         except Exception as e:
             logger.debug(f"Video click failed: {e}")
 
-        print("  ⚠ All play methods tried - video might need manual start")
+        logger.warning("All play methods tried - video might need manual start")
         return False
     
     async def extract_metadata_and_m3u8(self, url, wait_time=60, use_adblock=True, browser_id="", language=""):
@@ -479,11 +475,9 @@ class HLSExtractor:
         self._m3u8_event = asyncio.Event()  # Event-based m3u8 detection (instant!)
 
         # Helper function for logging with browser ID
-        def log(msg, prefix=""):
-            if self.browser_id:
-                print(f"{self.browser_id} {prefix}{msg}")
-            else:
-                print(f"{prefix}{msg}")
+        def log(msg, level="info", prefix=""):
+            formatted = f"{self.browser_id} {msg}" if self.browser_id else msg
+            getattr(logger, level)(formatted)
 
         async with async_playwright() as p:
             # Browser arguments
@@ -550,7 +544,7 @@ class HLSExtractor:
                 if not self.ad_filters:
                     self.load_brave_filters()
 
-                log(f"✓ Ad-blocking enabled ({len(self.ad_filters)} rules)")
+                log(f"Ad-blocking enabled ({len(self.ad_filters)} rules)")
 
                 blocked_count = [0]
 
@@ -563,7 +557,7 @@ class HLSExtractor:
                         if domain in self.ad_filters:
                             blocked_count[0] += 1
                             if blocked_count[0] <= 10:
-                                log(f"🚫 {domain}", "  ")
+                                log(f"Blocked: {domain}", "debug")
                             await route.abort()
                             return
                         
@@ -606,7 +600,7 @@ class HLSExtractor:
             async def handle_request(request):
                 url = request.url
                 if '.m3u8' in url:
-                    log(f"🎯 Found m3u8: {url[:100]}...", "\n")
+                    log(f"Found m3u8: {url[:100]}...")
                     self.m3u8_urls.append(url)
                     if not self.master_playlist and ('master' in url.lower() or len(self.m3u8_urls) == 1):
                         self.master_playlist = url
@@ -640,7 +634,7 @@ class HLSExtractor:
                     if self.metadata.series_name:
                         self.metadata.series_name = self.metadata.series_name.strip()
                         self.metadata.series_name_display = self.metadata.series_name
-                        log(f"✓ Series (from h1): {self.metadata.series_name}")
+                        log(f"Series (from h1): {self.metadata.series_name}")
             except Exception as e:
                 log(f"Could not extract series name from h1: {e}")
 
@@ -651,7 +645,7 @@ class HLSExtractor:
                     if series_element:
                         self.metadata.series_name = await series_element.inner_text()
                         self.metadata.series_name_display = self.metadata.series_name
-                        log(f"✓ Series (from hosterSeriesTitle): {self.metadata.series_name}")
+                        log(f"Series (from hosterSeriesTitle): {self.metadata.series_name}")
                 except Exception as e:
                     logger.debug(f"Could not extract series from hosterSeriesTitle: {e}")
 
@@ -659,7 +653,7 @@ class HLSExtractor:
                 season_meta = await page.query_selector('meta[itemprop="seasonNumber"]')
                 if season_meta:
                     self.metadata.season = await season_meta.get_attribute('content')
-                    log(f"✓ Season: {self.metadata.season}")
+                    log(f"Season: {self.metadata.season}")
             except Exception as e:
                 logger.debug(f"Could not extract season metadata: {e}")
 
@@ -667,7 +661,7 @@ class HLSExtractor:
                 episode_meta = await page.query_selector('meta[itemprop="episode"]')
                 if episode_meta:
                     self.metadata.episode = await episode_meta.get_attribute('content')
-                    log(f"✓ Episode: {self.metadata.episode}")
+                    log(f"Episode: {self.metadata.episode}")
             except Exception as e:
                 logger.debug(f"Could not extract episode metadata: {e}")
 
@@ -675,7 +669,7 @@ class HLSExtractor:
                 german_title = await page.query_selector('.episodeGermanTitle')
                 if german_title:
                     self.metadata.episode_title_german = await german_title.inner_text()
-                    log(f"✓ German Title: {self.metadata.episode_title_german}")
+                    log(f"German Title: {self.metadata.episode_title_german}")
             except Exception as e:
                 logger.debug(f"Could not extract German title: {e}")
 
@@ -683,7 +677,7 @@ class HLSExtractor:
                 english_title = await page.query_selector('small.episodeEnglishTitle')
                 if english_title:
                     self.metadata.episode_title_english = await english_title.inner_text()
-                    log(f"✓ English Title: {self.metadata.episode_title_english}")
+                    log(f"English Title: {self.metadata.episode_title_english}")
             except Exception as e:
                 logger.debug(f"Could not extract English title: {e}")
 
@@ -694,24 +688,24 @@ class HLSExtractor:
             # WICHTIG: SCROLL NACH UNTEN damit iframe sichtbar wird
             # ============================================================
 
-            log("📜 Scrolling page to load iframe properly...", "\n")
+            log("Scrolling page to load iframe properly...")
             try:
                 # Scroll mehrmals nach unten
                 for i in range(3):
                     await page.evaluate("window.scrollBy(0, 300)")
                     await asyncio.sleep(0.5)
-                log("✓ Scrolled down", "  ")
+                log("Scrolled down", "debug")
             except Exception as e:
-                log(f"⚠ Scroll failed: {e}", "  ")
+                log(f"Scroll failed: {e}", "warning")
 
             # ============================================================
             # LANGUAGE SELECTION (if specified)
             # ============================================================
 
-            log(f"🌐 Language parameter received: '{language}'", "\n")
+            log(f"Language parameter received: '{language}'", "debug")
 
             if language:
-                log(f"🌐 Selecting language: {language}", "\n")
+                log(f"Selecting language: {language}")
                 try:
                     # DEBUG: List all available languages first
                     available_langs = await page.evaluate('''() => {
@@ -723,7 +717,7 @@ class HLSExtractor:
                             src: img.src
                         }));
                     }''')
-                    log(f"  Available languages: {available_langs}", "  ")
+                    log(f"Available languages: {available_langs}", "debug")
 
                     # Find the language image with the specified data-lang-key
                     lang_selector = f'.changeLanguageBox img[data-lang-key="{language}"]'
@@ -735,10 +729,10 @@ class HLSExtractor:
                     }}''')
 
                     if is_already_selected:
-                        log(f"✓ Language {language} already selected", "  ")
+                        log(f"Language {language} already selected")
                     else:
                         # FIRST: Remove ad overlays that block clicks
-                        log(f"  Removing ad overlays...", "  ")
+                        log(f"Removing ad overlays...", "debug")
                         await page.evaluate('''() => {
                             // Remove common ad overlay elements
                             const adSelectors = [
@@ -777,7 +771,7 @@ class HLSExtractor:
                             const iframe = document.querySelector('.inSiteWebStream iframe');
                             return iframe ? iframe.src : null;
                         }''')
-                        log(f"  Current iframe: {iframe_before[:60] if iframe_before else 'none'}...", "  ")
+                        log(f"Current iframe: {iframe_before[:60] if iframe_before else 'none'}...", "debug")
 
                         # STEP 1: Click the language FLAG to make hosters for that language visible
                         max_attempts = 5
@@ -798,7 +792,7 @@ class HLSExtractor:
                             # Re-query the element each time (DOM might have changed)
                             lang_element = await page.query_selector(lang_selector)
                             if not lang_element:
-                                log(f"  Language element not found on attempt {attempt + 1}", "  ")
+                                log(f"Language element not found on attempt {attempt + 1}", "debug")
                                 await asyncio.sleep(1.0)
                                 continue
 
@@ -812,9 +806,9 @@ class HLSExtractor:
                                     const img = document.querySelector('.changeLanguageBox img[data-lang-key="{language}"]');
                                     if (img) img.click();
                                 }}''')
-                                log(f"  Clicked language flag via JS (attempt {attempt + 1})", "  ")
+                                log(f"Clicked language flag via JS (attempt {attempt + 1})", "debug")
                             except Exception as click_err:
-                                log(f"  Click failed: {click_err}", "  ")
+                                log(f"Click failed: {click_err}", "warning")
                                 continue
 
                             # Wait a moment for page to react
@@ -831,7 +825,7 @@ class HLSExtractor:
                                     except Exception as e:
                                         logger.debug(f"Failed to close popup tab: {e}")
                                 if closed_count > 0:
-                                    log(f"  Closed {closed_count} popup tab(s)", "  ")
+                                    log(f"Closed {closed_count} popup tab(s)", "debug")
 
                             # Check if language flag is now selected
                             is_now_selected = await page.evaluate(f'''() => {{
@@ -840,21 +834,21 @@ class HLSExtractor:
                             }}''')
 
                             if is_now_selected:
-                                log(f"✓ Language flag {language} now selected", "  ")
+                                log(f"Language flag {language} now selected")
                                 language_flag_changed = True
                                 break
 
                             if attempt < max_attempts - 1:
-                                log(f"  Language flag not yet selected, retrying...", "  ")
+                                log(f"Language flag not yet selected, retrying...", "debug")
                                 await asyncio.sleep(1.0)
 
                         if not language_flag_changed:
-                            log(f"⚠ Could not select language flag after {max_attempts} attempts", "  ")
+                            log(f"Could not select language flag after {max_attempts} attempts", "warning")
 
                         # After clicking language flag, the iframe automatically loads the new video
                         # Wait for the new iframe content to load
-                        log(f"⏳ Waiting for new language content to load...", "  ")
-                        await asyncio.sleep(3.0)
+                        log(f"Waiting for new language content to load...")
+                        await asyncio.sleep(2.0)
 
                         # Verify iframe changed
                         iframe_after = await page.evaluate('''() => {
@@ -862,14 +856,13 @@ class HLSExtractor:
                             return iframe ? iframe.src : null;
                         }''')
                         if iframe_after and iframe_before and iframe_after != iframe_before:
-                            log(f"✓ Iframe updated to: {iframe_after[:60]}...", "  ")
+                            log(f"Iframe updated to: {iframe_after[:60]}...")
                         else:
-                            log(f"⚠ Iframe may not have changed yet", "  ")
+                            log(f"Iframe may not have changed yet", "warning")
 
                 except Exception as e:
-                    log(f"⚠ Language selection failed: {e}", "  ")
-                    import traceback
-                    traceback.print_exc()
+                    log(f"Language selection failed: {e}", "warning")
+                    logger.warning("Language selection error details", exc_info=True)
                     # List available languages for debugging
                     try:
                         available = await page.evaluate('''() => {
@@ -881,7 +874,7 @@ class HLSExtractor:
                             }));
                         }''')
                         if available:
-                            log(f"  Available languages: {available}", "  ")
+                            log(f"Available languages: {available}", "debug")
                     except Exception as e:
                         logger.debug(f"Could not list available languages: {e}")
 
@@ -894,7 +887,7 @@ class HLSExtractor:
             popup_count = await self.click_18_plus_popups(page, context, "initial")
             
             if popup_count == 0:
-                print("  → No popups found (as expected for this site)")
+                logger.debug("No popups found (as expected for this site)")
             
             # ============================================================
             # PLAY BUTTON KLICKEN (role='button' mit "Spielen" Text!)
@@ -903,13 +896,13 @@ class HLSExtractor:
             play_clicked = await self.click_play_button(page, context)
             
             if not play_clicked:
-                print("  ⚠ Play button not clicked - video might auto-play or need manual start")
+                logger.warning("Play button not clicked - video might auto-play or need manual start")
             
             # ============================================================
             # WARTE AUF M3U8 (Event-basiert - SOFORTIGE Erkennung!)
             # ============================================================
 
-            log(f"⏳ Waiting up to {wait_time}s for m3u8 (event-based)...", "\n")
+            log(f"Waiting up to {wait_time}s for m3u8 (event-based)...")
 
             start_time = asyncio.get_event_loop().time()
 
@@ -918,22 +911,19 @@ class HLSExtractor:
                 # Kein 2-Sekunden-Polling mehr nötig!
                 await asyncio.wait_for(self._m3u8_event.wait(), timeout=wait_time)
                 elapsed = asyncio.get_event_loop().time() - start_time
-                log(f"✅ SUCCESS! m3u8 found after {elapsed:.1f} seconds! (event-based)", "\n")
-                log("🔒 Closing browser to free resources...")
+                log(f"SUCCESS! m3u8 found after {elapsed:.1f} seconds! (event-based)")
+                log("Closing browser to free resources...")
             except asyncio.TimeoutError:
-                log(f"❌ No m3u8 found after {wait_time}s", "\n")
-                log("Try:", "   ")
-                log("1. Increase --wait to 70 or 80", "   ")
-                log("2. Check if video started playing in browser", "   ")
-                log("3. Try without --no-adblock", "   ")
+                log(f"No m3u8 found after {wait_time}s", "error")
+                log("Try: 1. Increase --wait to 70 or 80, 2. Check if video started playing in browser, 3. Try without --no-adblock", "error")
 
             if use_adblock and blocked_count[0] > 10:
-                log(f"🚫 Total blocked: {blocked_count[0]} requests", "\n")
+                log(f"Total blocked: {blocked_count[0]} requests")
 
             # Browser schließen (jetzt auch wenn m3u8 gefunden wurde)
             await browser.close()
             if self.m3u8_urls:
-                log("✓ Browser closed, resources freed")
+                log("Browser closed, resources freed")
             
         return self.m3u8_urls
     
@@ -949,7 +939,7 @@ class HLSExtractor:
                 self.metadata.season = match.group(2)
             if not self.metadata.episode:
                 self.metadata.episode = match.group(3)
-            print(f"✓ Fallback URL parsing successful")
+            logger.info(f"Fallback URL parsing successful")
 
 def parse_episode_range(episodes_str: str) -> List[int]:
     """
@@ -1023,7 +1013,7 @@ async def detect_series_info(url: str) -> Tuple[Optional[int], Optional[List[int
             return total_seasons, sorted(set(episodes)) if episodes else None
 
     except Exception as e:
-        print(f"⚠️  Could not auto-detect series info: {e}")
+        logger.warning(f"Could not auto-detect series info: {e}")
         return None, None
 
 def parse_flexible_url(url: str) -> Tuple[Optional[str], Optional[str], Optional[int], Optional[int], Optional[str]]:
@@ -1152,10 +1142,10 @@ def download_video_sync(m3u8_url, output_path, quality="best"):
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nDownloading...")
-    print(f"  From: {m3u8_url[:80]}...")
-    print(f"  To: {output_path.name}")
-    print(f"  Quality: {quality}")
+    logger.info(f"Downloading...")
+    logger.info(f"From: {m3u8_url[:80]}...")
+    logger.info(f"To: {output_path.name}")
+    logger.info(f"Quality: {quality}")
 
     # Use Python module to ensure it works from venv
     command = [
@@ -1169,11 +1159,11 @@ def download_video_sync(m3u8_url, output_path, quality="best"):
 
     try:
         subprocess.run(command, check=True)
-        print(f"\n✓ Download complete: {output_path.name}")
+        logger.info(f"Download complete: {output_path.name}")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"✗ yt-dlp failed: {e}")
-        print("\nTrying with ffmpeg...")
+        logger.error(f"yt-dlp failed: {e}")
+        logger.info("Trying with ffmpeg...")
         try:
             ffmpeg_command = [
                 "ffmpeg",
@@ -1185,10 +1175,10 @@ def download_video_sync(m3u8_url, output_path, quality="best"):
                 "-stats"
             ]
             subprocess.run(ffmpeg_command, check=True)
-            print(f"\n✓ Download complete: {output_path.name}")
+            logger.info(f"Download complete: {output_path.name}")
             return True
         except subprocess.CalledProcessError:
-            print("✗ ffmpeg also failed")
+            logger.error("ffmpeg also failed")
             return False
 
 
@@ -1212,13 +1202,13 @@ async def download_video(m3u8_url, output_path, quality="best"):
 async def process_single_episode(extractor, url, args, browser_id=""):
     """Verarbeitet eine einzelne Episode"""
     if browser_id:
-        print(f"\n{browser_id} {'='*60}")
-        print(f"{browser_id} Processing: {url}")
-        print(f"{browser_id} {'='*60}\n")
+        logger.info(f"{browser_id} {'='*60}")
+        logger.info(f"{browser_id} Processing: {url}")
+        logger.info(f"{browser_id} {'='*60}")
     else:
-        print(f"\n{'='*70}")
-        print(f"Processing: {url}")
-        print(f"{'='*70}\n")
+        logger.info(f"{'='*70}")
+        logger.info(f"Processing: {url}")
+        logger.info(f"{'='*70}")
 
     m3u8_urls = await extractor.extract_metadata_and_m3u8(
         url,
@@ -1228,16 +1218,15 @@ async def process_single_episode(extractor, url, args, browser_id=""):
     )
     
     if not m3u8_urls:
-        print(f"\n✗ No m3u8 found for {url}")
+        logger.error(f"No m3u8 found for {url}")
         return False
     
-    print(f"\nExtracted: S{extractor.metadata.season}E{extractor.metadata.episode}", end="")
+    title_info = ""
     if extractor.metadata.episode_title_english:
-        print(f" - {extractor.metadata.episode_title_english}")
+        title_info = f" - {extractor.metadata.episode_title_english}"
     elif extractor.metadata.episode_title_german:
-        print(f" - {extractor.metadata.episode_title_german}")
-    else:
-        print()
+        title_info = f" - {extractor.metadata.episode_title_german}"
+    logger.info(f"Extracted: S{extractor.metadata.season}E{extractor.metadata.episode}{title_info}")
     
     if args.series_display:
         extractor.metadata.series_name_display = args.series_display
@@ -1250,11 +1239,11 @@ async def process_single_episode(extractor, url, args, browser_id=""):
     )
     
     if output_path.exists() and not args.force:
-        print(f"⚠ File already exists: {output_path.name}")
-        print("  Skipping... (use --force to overwrite)")
+        logger.warning(f"File already exists: {output_path.name}")
+        logger.warning("Skipping... (use --force to overwrite)")
         return True
     
-    print(f"\nFull path: {output_path}")
+    logger.info(f"Full path: {output_path}")
     
     download_url = extractor.master_playlist if extractor.master_playlist else m3u8_urls[0]
 
@@ -1262,8 +1251,8 @@ async def process_single_episode(extractor, url, args, browser_id=""):
         success = await download_video(download_url, output_path, args.quality)
         return success
     else:
-        print("\n✓ Metadata extracted (download skipped)")
-        print(f"  Manual: yt-dlp -o '{output_path}' {download_url}")
+        logger.info("Metadata extracted (download skipped)")
+        logger.info(f"Manual: yt-dlp -o '{output_path}' {download_url}")
         return True
 
 async def process_episode_with_semaphore(semaphore, ep_num, base_url, season, args, episode_idx, total_episodes, browser_num):
@@ -1273,7 +1262,7 @@ async def process_episode_with_semaphore(semaphore, ep_num, base_url, season, ar
     async with semaphore:
         url = f"{base_url}/staffel-{season}/episode-{ep_num}"
 
-        print(f"\n{browser_id} ▶️  Starting S{season:02d}E{ep_num:02d} ({episode_idx}/{total_episodes})")
+        logger.info(f"{browser_id} Starting S{season:02d}E{ep_num:02d} ({episode_idx}/{total_episodes})")
 
         try:
             # Jede Episode bekommt ihren eigenen Extractor
@@ -1281,13 +1270,13 @@ async def process_episode_with_semaphore(semaphore, ep_num, base_url, season, ar
             result = await process_single_episode(extractor, url, args, browser_id)
 
             if result:
-                print(f"\n{browser_id} ✅ S{season:02d}E{ep_num:02d} - SUCCESS! ({episode_idx}/{total_episodes})")
+                logger.info(f"{browser_id} S{season:02d}E{ep_num:02d} - SUCCESS! ({episode_idx}/{total_episodes})")
             else:
-                print(f"\n{browser_id} ❌ S{season:02d}E{ep_num:02d} - FAILED! ({episode_idx}/{total_episodes})")
+                logger.error(f"{browser_id} S{season:02d}E{ep_num:02d} - FAILED! ({episode_idx}/{total_episodes})")
 
             return result
         except Exception as e:
-            print(f"\n{browser_id} ❌ S{season:02d}E{ep_num:02d} - ERROR: {e} ({episode_idx}/{total_episodes})")
+            logger.error(f"{browser_id} S{season:02d}E{ep_num:02d} - ERROR: {e} ({episode_idx}/{total_episodes})")
             return False
 
 async def main():
@@ -1331,96 +1320,91 @@ Examples:
     
     args = parser.parse_args()
     
-    print("="*70)
-    print("HLS Video Downloader - FINAL VERSION")
-    print("Handles 18+ popups and play button automatically")
+    logger.info("="*70)
+    logger.info("HLS Video Downloader - FINAL VERSION")
+    logger.info("Handles 18+ popups and play button automatically")
     if args.parallel > 1:
-        print(f"⚡ PARALLEL MODE: {args.parallel} concurrent windows")
-    print("="*70 + "\n")
+        logger.info(f"PARALLEL MODE: {args.parallel} concurrent windows")
+    logger.info("="*70)
 
     # Parse URL with flexible format support
     base_url, series_slug, season, start_episode, url_type = parse_flexible_url(args.url)
 
     if not base_url:
-        print("✗ Invalid URL format!")
-        print("Supported formats:")
-        print("  1. http://site/serie/stream/NAME/staffel-N/episode-N")
-        print("  2. http://site/serie/stream/NAME/staffel-N")
-        print("  3. http://site/serie/stream/NAME")
+        logger.error("Invalid URL format!")
+        logger.error("Supported formats: 1. http://site/serie/stream/NAME/staffel-N/episode-N, 2. http://site/serie/stream/NAME/staffel-N, 3. http://site/serie/stream/NAME")
         sys.exit(1)
 
-    print(f"📝 Detected URL type: {url_type}")
-    print(f"   Series: {series_slug}")
+    logger.info(f"Detected URL type: {url_type}")
+    logger.info(f"Series: {series_slug}")
 
     # Handle different URL types
     if url_type == 'series':
         # No season specified - need to detect or ask
-        print("\n⚠️  No season specified in URL")
+        logger.warning("No season specified in URL")
 
         if args.season:
             season = args.season
-            print(f"✓ Using --season argument: Season {season}")
+            logger.info(f"Using --season argument: Season {season}")
         else:
             # Auto-detect available seasons
-            print("🔍 Auto-detecting available seasons...")
+            logger.info("Auto-detecting available seasons...")
             total_seasons, _ = await detect_series_info(args.url)
 
             if total_seasons:
-                print(f"✓ Found {total_seasons} season(s)")
+                logger.info(f"Found {total_seasons} season(s)")
                 if total_seasons == 1:
                     season = 1
-                    print(f"✓ Auto-selected: Season 1")
+                    logger.info(f"Auto-selected: Season 1")
                 else:
-                    print(f"\nAvailable seasons: 1-{total_seasons}")
-                    print("Please specify season with --season N")
+                    logger.info(f"Available seasons: 1-{total_seasons}")
+                    logger.info("Please specify season with --season N")
                     sys.exit(1)
             else:
-                print("❌ Could not auto-detect seasons")
-                print("Please specify season with --season N")
+                logger.error("Could not auto-detect seasons")
+                logger.error("Please specify season with --season N")
                 sys.exit(1)
 
     elif url_type == 'season':
         # Season specified, but no episode
-        print(f"   Season: {season}")
+        logger.info(f"Season: {season}")
 
         if not args.episodes:
             # Auto-detect available episodes
-            print(f"\n🔍 Auto-detecting episodes for Season {season}...")
+            logger.info(f"Auto-detecting episodes for Season {season}...")
             season_url = f"{base_url}/staffel-{season}"
             _, available_episodes = await detect_series_info(season_url)
 
             if available_episodes:
-                print(f"✓ Found {len(available_episodes)} episode(s): {available_episodes[0]}-{available_episodes[-1]}")
-                print(f"💡 Tip: Use --episodes {available_episodes[0]}-{available_episodes[-1]} to download all")
+                logger.info(f"Found {len(available_episodes)} episode(s): {available_episodes[0]}-{available_episodes[-1]}")
+                logger.info(f"Tip: Use --episodes {available_episodes[0]}-{available_episodes[-1]} to download all")
 
                 # Use first episode as start
                 start_episode = available_episodes[0]
-                print(f"✓ Using first episode: E{start_episode:02d}")
+                logger.info(f"Using first episode: E{start_episode:02d}")
             else:
-                print("❌ Could not auto-detect episodes")
+                logger.error("Could not auto-detect episodes")
                 start_episode = 1
-                print("⚠️  Defaulting to Episode 1")
+                logger.warning("Defaulting to Episode 1")
 
     else:  # url_type == 'full'
-        print(f"   Season: {season}")
-        print(f"   Episode: {start_episode}")
+        logger.info(f"Season: {season}")
+        logger.info(f"Episode: {start_episode}")
 
     # Override season if specified
     if args.season:
         season = args.season
-        print(f"✓ Season overridden to: {season}")
+        logger.info(f"Season overridden to: {season}")
     
     if args.episodes:
         episodes = parse_episode_range(args.episodes)
-        print(f"Batch mode: {len(episodes)} episode(s) from Season {season}")
-        print(f"Episodes: {episodes}")
+        logger.info(f"Batch mode: {len(episodes)} episode(s) from Season {season}")
+        logger.info(f"Episodes: {episodes}")
         if args.parallel > 1:
-            print(f"Processing {args.parallel} episodes in parallel\n")
-        else:
-            print()
+            logger.info(f"Processing {args.parallel} episodes in parallel")
     else:
         episodes = [start_episode]
-        print(f"Single mode: S{season:02d}E{start_episode:02d}\n")
+        logger.info(f"Single mode: S{season:02d}E{start_episode:02d}")
     
     successful = 0
     failed = 0
@@ -1432,8 +1416,8 @@ Examples:
     
     if args.parallel > 1 and len(episodes) > 1:
         # PARALLEL MODE (2-4 gleichzeitige Browser)
-        print(f"🚀 Starting parallel processing with {args.parallel} windows...")
-        print(f"⏱️  This will be ~{args.parallel}x faster!\n")
+        logger.info(f"Starting parallel processing with {args.parallel} windows...")
+        logger.info(f"This will be ~{args.parallel}x faster!")
         
         # Semaphore limitiert auf max. parallel Fenster
         semaphore = asyncio.Semaphore(args.parallel)
@@ -1470,14 +1454,14 @@ Examples:
     else:
         # SEQUENTIAL MODE (1 Browser nach dem anderen)
         if len(episodes) > 1:
-            print("📝 Sequential processing (use --parallel 2-4 for faster processing)\n")
+            logger.info("Sequential processing (use --parallel 2-4 for faster processing)")
         
         extractor = HLSExtractor()
         
         for i, ep_num in enumerate(episodes, 1):
             url = f"{base_url}/staffel-{season}/episode-{ep_num}"
             
-            print(f"\n[Episode {i}/{total}]")
+            logger.info(f"[Episode {i}/{total}]")
             
             try:
                 result = await process_single_episode(extractor, url, args)
@@ -1486,32 +1470,30 @@ Examples:
                 else:
                     failed += 1
             except KeyboardInterrupt:
-                print("\n\n✗ Aborted")
+                logger.warning("Aborted")
                 break
             except Exception as e:
-                print(f"\n✗ Error: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error(f"Error: {e}", exc_info=True)
                 failed += 1
             
             # Pause zwischen Episoden (nur im Sequential Mode)
             if len(episodes) > 1 and ep_num != episodes[-1]:
-                print(f"\n⏳ Waiting 5s before next episode...")
-                await asyncio.sleep(5)
+                logger.info(f"Waiting 2s before next episode...")
+                await asyncio.sleep(2)
     
-    print(f"\n{'='*70}")
-    print("Summary:")
-    print(f"  ✓ Successful: {successful}")
-    print(f"  ✗ Failed: {failed}")
-    print(f"  📊 Total: {total}")
-    print(f"{'='*70}")
+    logger.info(f"{'='*70}")
+    logger.info("Summary:")
+    logger.info(f"Successful: {successful}")
+    logger.info(f"Failed: {failed}")
+    logger.info(f"Total: {total}")
+    logger.info(f"{'='*70}")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n\n✗ Aborted")
+        logger.warning("Aborted")
         sys.exit(0)
     except Exception as e:
-        print(f"\n✗ Fatal error: {e}")
+        logger.error(f"Fatal error: {e}")
         sys.exit(1)

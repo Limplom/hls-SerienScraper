@@ -242,6 +242,27 @@
     color: #f1c40f;
 }
 
+.btn-danger {
+    padding: 0.75rem 1.5rem;
+    border: 1px solid #e74c3c;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    flex: 1;
+    min-width: 150px;
+    background: rgba(231, 76, 60, 0.15);
+    color: #e74c3c;
+}
+
+.btn-danger:hover {
+    background: rgba(231, 76, 60, 0.3);
+    border-color: #ff6b5a;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(231, 76, 60, 0.3);
+}
+
 .restart-notice {
     background: rgba(241, 196, 15, 0.1);
     border: 1px solid #f1c40f;
@@ -252,6 +273,26 @@
     text-align: center;
     font-weight: 500;
     animation: pulse 2s infinite;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.btn-restart-inline {
+    padding: 0.4rem 1rem;
+    background: rgba(241, 196, 15, 0.2);
+    border: 1px solid #f1c40f;
+    border-radius: 6px;
+    color: #f1c40f;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-restart-inline:hover {
+    background: rgba(241, 196, 15, 0.4);
 }
 
 @keyframes pulse {

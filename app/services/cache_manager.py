@@ -6,11 +6,14 @@ import os
 import json
 import hashlib
 import time
+import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 import requests
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 
 class CacheManager:
@@ -298,7 +301,7 @@ class CacheManager:
         Args:
             series_list: List of popular series slugs to warm
         """
-        print(f"🔥 Warming cache for {len(series_list)} popular series...")
+        logger.info(f"Warming cache for {len(series_list)} popular series...")
 
         for series_slug in series_list:
             # Load metadata files for this series
@@ -313,7 +316,7 @@ class CacheManager:
                 except Exception:
                     continue
 
-        print(f"✅ Cache warmed with {len(self._hot_cache)} items")
+        logger.info(f"Cache warmed with {len(self._hot_cache)} items")
 
     # ==========================================
     # Cache statistics
@@ -377,7 +380,7 @@ class CacheManager:
                 cache_file.unlink()
                 removed_count += 1
 
-        print(f"🧹 Cleaned up {removed_count} expired cache entries")
+        logger.info(f"Cleaned up {removed_count} expired cache entries")
         return removed_count
 
     def clear_all(self):
@@ -395,7 +398,7 @@ class CacheManager:
         # Clear hot cache
         self.clear_hot_cache()
 
-        print("🗑️ All caches cleared")
+        logger.info("All caches cleared")
 
 
 # Global cache manager instance
@@ -406,5 +409,6 @@ def get_cache_manager() -> CacheManager:
     """Get global cache manager instance"""
     global _cache_manager
     if _cache_manager is None:
-        _cache_manager = CacheManager()
+        from app.config import PROJECT_ROOT
+        _cache_manager = CacheManager(cache_dir=str(PROJECT_ROOT / 'cache'))
     return _cache_manager
