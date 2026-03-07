@@ -1056,25 +1056,37 @@ class HLSExtractor:
                 self.metadata.episode = match.group(3)
             logger.info(f"Fallback URL parsing successful")
 
-def parse_episode_range(episodes_str: str) -> List[int]:
+def parse_episode_range(episodes_str: str, max_episodes: int = 500) -> List[int]:
     """
     Parse episode range string into list of episode numbers.
 
     Args:
         episodes_str: String like "1-5,8,10-12"
+        max_episodes: Maximum number of episodes allowed (prevents DoS)
 
     Returns:
         Sorted list of episode numbers
+
+    Raises:
+        ValueError: If range is invalid or exceeds max_episodes
     """
     episodes = set()
 
     for part in episodes_str.split(','):
         part = part.strip()
+        if not part:
+            continue
         if '-' in part:
-            start, end = map(int, part.split('-'))
+            start, end = map(int, part.split('-', 1))
+            if start < 0 or end < 0 or start > end:
+                raise ValueError(f"Invalid range: {part}")
+            if end - start + 1 > max_episodes:
+                raise ValueError(f"Range {part} exceeds maximum of {max_episodes} episodes")
             episodes.update(range(start, end + 1))
         else:
             episodes.add(int(part))
+        if len(episodes) > max_episodes:
+            raise ValueError(f"Total episodes exceed maximum of {max_episodes}")
 
     return sorted(episodes)
 

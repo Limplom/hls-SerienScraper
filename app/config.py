@@ -35,9 +35,30 @@ def _load_settings_json():
 _json_settings = _load_settings_json()
 
 
+def _get_or_create_secret_key():
+    """Get secret key from env, file, or generate and persist a new one."""
+    env_key = os.getenv('SECRET_KEY')
+    if env_key:
+        return env_key
+    key_file = PROJECT_ROOT / "config" / ".secret_key"
+    if key_file.exists():
+        try:
+            return key_file.read_text().strip()
+        except Exception:
+            pass
+    key = os.urandom(32).hex()
+    try:
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        key_file.write_text(key)
+        key_file.chmod(0o600)
+    except Exception as e:
+        logger.warning(f"Could not persist secret key: {e}")
+    return key
+
+
 class Config:
     """Base configuration"""
-    SECRET_KEY = os.getenv('SECRET_KEY', os.urandom(24).hex())
+    SECRET_KEY = _get_or_create_secret_key()
 
     # ===========================================
     # DOWNLOAD SETTINGS (from settings.json or env)

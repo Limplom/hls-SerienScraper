@@ -90,8 +90,8 @@ class RequestFilter(logging.Filter):
 log = logging.getLogger('werkzeug')
 log.addFilter(RequestFilter())
 
-# Security: Use environment variable for secret key, generate random default for development
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', os.urandom(24).hex())
+# Security: Use persisted secret key from Config
+app.config['SECRET_KEY'] = Config.SECRET_KEY
 
 # CORS configuration for SocketIO
 # For local development, allow all origins. For production, set CORS_ORIGINS env variable.
@@ -100,7 +100,8 @@ if os.getenv('CORS_ORIGINS'):
 else:
     # Local development - allow all origins
     ALLOWED_ORIGINS = "*"
-socketio = SocketIO(app, cors_allowed_origins=ALLOWED_ORIGINS, async_mode='threading')
+socketio = SocketIO(app, cors_allowed_origins=ALLOWED_ORIGINS, async_mode='threading',
+                    ping_timeout=30, ping_interval=15)
 
 # Register blueprints
 from app.routes import settings_bp, catalog_bp
@@ -2944,10 +2945,17 @@ def index():
 def start_download():
     """Add download to queue (or merge with existing if same series)"""
     data = request.json
-    url = data.get('url')
+    if not data or not isinstance(data, dict):
+        return jsonify({'error': 'Invalid JSON body'}), 400
 
-    if not url:
+    url = data.get('url')
+    if not url or not isinstance(url, str):
         return jsonify({'error': 'URL is required'}), 400
+
+    # Basic URL validation
+    url = url.strip()
+    if not url.startswith(('http://', 'https://')):
+        return jsonify({'error': 'Invalid URL format'}), 400
 
     options = data.get('options', {})
 
@@ -3104,10 +3112,13 @@ def stop_queue_processor(timeout: float = 30.0):
 def parse_url():
     """Parse URL and detect available episodes - Full scraping with caching"""
     data = request.json
-    url = data.get('url')
+    if not data or not isinstance(data, dict):
+        return jsonify({'error': 'Invalid JSON body'}), 400
+
+    url = data.get('url', '').strip()
     force_refresh = data.get('force_refresh', False)
 
-    if not url:
+    if not url or not url.startswith(('http://', 'https://')):
         return jsonify({'error': 'URL is required'}), 400
 
     try:

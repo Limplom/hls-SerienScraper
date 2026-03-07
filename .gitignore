@@ -7,3 +7,4 @@ download_queue.json
 /.claude
 /Downloads
 /bin
+config/.secret_key

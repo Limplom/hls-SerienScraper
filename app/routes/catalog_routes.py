@@ -45,6 +45,8 @@ def get_catalog():
     }
     """
     source = request.args.get('source', 'series')
+    if source not in ('series', 'anime'):
+        return jsonify({'error': 'Invalid source. Must be "series" or "anime"'}), 400
     force_refresh = request.args.get('force_refresh', 'false').lower() == 'true'
 
     # Try cache first unless force refresh

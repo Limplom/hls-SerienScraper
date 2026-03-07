@@ -81,14 +81,39 @@ def save_settings():
                 'error': 'No settings provided'
             }), 400
 
-        # Validate settings against configured limit
+        # Validate settings
         if 'max_parallel_downloads' in new_settings:
             max_val = new_settings.get('max_parallel_limit', Config.MAX_PARALLEL_LIMIT)
-            if not (1 <= new_settings['max_parallel_downloads'] <= max_val):
+            try:
+                val = int(new_settings['max_parallel_downloads'])
+                if not (1 <= val <= max_val):
+                    raise ValueError()
+                new_settings['max_parallel_downloads'] = val
+            except (ValueError, TypeError):
                 return jsonify({
                     'success': False,
                     'error': f'max_parallel_downloads must be between 1 and {max_val}'
                 }), 400
+
+        if 'default_format' in new_settings:
+            if new_settings['default_format'] not in ('mkv', 'mp4', 'avi', 'ts'):
+                return jsonify({
+                    'success': False,
+                    'error': 'default_format must be mkv, mp4, avi, or ts'
+                }), 400
+
+        if 'download_path' in new_settings:
+            dl_path = str(new_settings['download_path']).strip()
+            # Prevent path traversal
+            if '..' in dl_path:
+                return jsonify({
+                    'success': False,
+                    'error': 'download_path must not contain ".."'
+                }), 400
+            new_settings['download_path'] = dl_path
+
+        # Log what changed
+        logger.info(f"Settings update: {list(new_settings.keys())}")
 
         # Save to file
         settings_file = PROJECT_ROOT / "config" / "settings.json"
