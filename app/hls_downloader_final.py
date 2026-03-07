@@ -23,7 +23,7 @@ from typing import Optional, List, Dict, Any, Tuple, Set
 if sys.platform == 'win32':
     try:
         sys.stdout.reconfigure(encoding='utf-8')
-    except:
+    except Exception:
         pass
 
 # Import config for browser settings
@@ -164,71 +164,169 @@ class HLSExtractor:
             logger.debug(f"Error in close_new_tabs: {e}")
             return 0
     
+    async def _remove_overlays(self, page):
+        """Entfernt Ad-Overlays und blockierende Elemente von der Seite"""
+        try:
+            await page.evaluate('''() => {
+                // Remove known ad overlay elements
+                const adSelectors = [
+                    '[id*="ad-"]', '[class*="ad-overlay"]',
+                    '[style*="z-index: 999"]', '[style*="z-index:999"]',
+                    '[style*="z-index: 9999"]', '[style*="z-index:9999"]',
+                ];
+                adSelectors.forEach(sel => {
+                    try {
+                        document.querySelectorAll(sel).forEach(el => {
+                            if (el.tagName === 'A' || el.id.match(/^[a-z]{5,}$/i)) {
+                                el.remove();
+                            }
+                        });
+                    } catch(e) {}
+                });
+                // Remove full-screen fixed overlays (likely ads)
+                document.querySelectorAll('div').forEach(el => {
+                    const style = window.getComputedStyle(el);
+                    if (style.position === 'fixed' &&
+                        parseInt(style.zIndex) > 100 &&
+                        el.offsetWidth > window.innerWidth * 0.8 &&
+                        el.offsetHeight > window.innerHeight * 0.8 &&
+                        !el.querySelector('video')) {
+                        el.remove();
+                    }
+                });
+            }''')
+        except Exception as e:
+            logger.debug(f"Overlay removal error: {e}")
+
+    async def _detect_modal_popup(self, frame):
+        """Erkennt modale Dialoge (SweetAlert, Bootstrap, custom modals)"""
+        try:
+            return await frame.evaluate('''() => {
+                // SweetAlert2
+                const swal = document.querySelector('.swal2-container, .swal2-popup');
+                if (swal && swal.offsetParent !== null) return 'swal2';
+                // Bootstrap modal
+                const bsModal = document.querySelector('.modal.show, .modal[style*="display: block"]');
+                if (bsModal) return 'bootstrap';
+                // Generic modal/dialog overlays
+                const genericModal = document.querySelector(
+                    '[role="dialog"]:not([aria-hidden="true"]), ' +
+                    '[class*="modal"]:not([style*="display: none"]):not([aria-hidden="true"]), ' +
+                    '[class*="popup"]:not([style*="display: none"]):not([aria-hidden="true"]), ' +
+                    '[class*="age-verify"], [class*="age_verify"], [id*="age-verify"], [id*="age_verify"]'
+                );
+                if (genericModal && genericModal.offsetParent !== null) return 'generic';
+                return null;
+            }''')
+        except Exception:
+            return None
+
     async def click_18_plus_popups(self, page, context, phase="initial"):
-        """Klickt alle 18+ OK Buttons weg - NUR ECHTE POPUPS!"""
+        """Klickt alle 18+ OK Buttons weg - erkennt iframes, modals und overlays"""
         logger.info(f"Checking for 18+ popups ({phase})...")
-        
+
         clicked_count = 0
-        max_attempts = 10
-        
+        max_attempts = 8
+
+        # Erweiterte Selektoren für verschiedene Popup-Typen
         button_selectors = [
+            # SweetAlert
+            '.swal2-confirm',
+            '.swal2-styled',
+            # Standard buttons
             'button:has-text("OK")',
             'button:has-text("Ok")',
             'button:has-text("Confirm")',
-            '.swal2-confirm',
-            '.swal2-styled',
+            'button:has-text("Bestätigen")',
+            'button:has-text("Ja")',
+            'button:has-text("Yes")',
+            'button:has-text("Ich bin 18")',
+            'button:has-text("I am 18")',
+            'button:has-text("Enter")',
+            'button:has-text("Eintreten")',
+            # Generic confirm patterns
             'button[class*="confirm"]',
+            'button[class*="accept"]',
+            'button[class*="agree"]',
+            'a[class*="confirm"]',
+            'a[class*="accept"]',
+            # Age-verification specific
+            '[class*="age"] button',
+            '[id*="age"] button',
+            '[class*="age-gate"] button',
+            '[class*="verify"] button',
         ]
-        
+
+        # Confirm-Texte die auf echte Popups hindeuten (nicht Werbung)
+        confirm_texts = {'ok', 'confirm', 'bestätigen', 'ja', 'yes', 'enter',
+                         'eintreten', 'ich bin 18', 'i am 18', 'accept', 'akzeptieren',
+                         'agree', 'zustimmen', 'weiter', 'continue'}
+
         for attempt in range(max_attempts):
             try:
                 await asyncio.sleep(1)
-                
-                # Schließe neue Tabs (Werbung)
+
+                # Schließe Werbe-Tabs
                 await self.close_new_tabs(context, page)
-                
+
+                # Entferne Ad-Overlays die Clicks blockieren
+                await self._remove_overlays(page)
+
                 found_button = False
-                
-                # Check ALLE Frames ABER ignoriere about:blank (sind Werbe-iframes)
+
+                # Scroll um verzögerte Popups zu triggern
+                if attempt == 2:
+                    try:
+                        await page.evaluate("window.scrollBy(0, 300)")
+                        await asyncio.sleep(0.5)
+                        await page.evaluate("window.scrollTo(0, 0)")
+                    except Exception:
+                        pass
+
+                # Check alle Frames (main + iframes mit content)
                 for frame in page.frames:
                     frame_url = frame.url
-                    
-                    # WICHTIG: Ignoriere about:blank und leere iframes!
                     if not frame_url or frame_url == 'about:blank' or frame_url == '':
                         continue
-                    
+
                     frame_name = "main" if frame == page.main_frame else f"iframe:{frame_url[:50]}"
-                    
+
+                    # Prüfe auf modale Dialoge
+                    modal_type = await self._detect_modal_popup(frame)
+                    if modal_type:
+                        logger.info(f"Detected {modal_type} modal in {frame_name}")
+
                     for selector in button_selectors:
                         try:
                             buttons = await frame.query_selector_all(selector)
-                            if buttons:
-                                for button in buttons:
-                                    try:
-                                        is_visible = await button.is_visible()
-                                        if is_visible:
-                                            text = await button.inner_text()
-                                            text_lower = text.lower()
-                                            
-                                            # Nur echte Confirm-Buttons
-                                            if 'ok' in text_lower or 'confirm' in text_lower:
-                                                logger.info(f"Found popup in {frame_name}")
-                                                logger.debug(f"Button text: '{text}'")
-                                                
-                                                # Click mit extra Vorsicht
-                                                try:
-                                                    await button.click(timeout=2000, force=True)
-                                                    clicked_count += 1
-                                                    found_button = True
-                                                    logger.info(f"Clicked popup #{clicked_count}")
-                                                    await asyncio.sleep(2)
-                                                    
-                                                    # Schließe neue Tabs die durch Click entstanden
-                                                    await self.close_new_tabs(context, page)
-                                                except Exception as e:
-                                                    logger.debug(f"Click failed: {e}")
-                                    except Exception as e:
-                                        logger.debug(f"Button interaction error: {e}")
+                            if not buttons:
+                                continue
+                            for button in buttons:
+                                try:
+                                    is_visible = await button.is_visible()
+                                    if not is_visible:
+                                        continue
+                                    text = (await button.inner_text()).strip()
+                                    text_lower = text.lower()
+
+                                    # Nur echte Confirm-Buttons (nicht Werbung)
+                                    if any(ct in text_lower for ct in confirm_texts):
+                                        logger.info(f"Found popup button in {frame_name}: '{text}'")
+                                        try:
+                                            # JavaScript-Click als Fallback falls normaler Click blockiert
+                                            try:
+                                                await button.click(timeout=2000, force=True)
+                                            except Exception:
+                                                await frame.evaluate('(el) => el.click()', button)
+                                            clicked_count += 1
+                                            found_button = True
+                                            logger.info(f"Clicked popup #{clicked_count}")
+                                            await asyncio.sleep(1.5)
+                                            await self.close_new_tabs(context, page)
+                                        except Exception as e:
+                                            logger.debug(f"Click failed: {e}")
+                                except Exception as e:
+                                    logger.debug(f"Button interaction error: {e}")
                         except Exception as e:
                             logger.debug(f"Frame interaction error: {e}")
 
@@ -237,13 +335,13 @@ class HLSExtractor:
 
             except Exception as e:
                 logger.debug(f"Popup check attempt error: {e}")
-        
+
         if clicked_count > 0:
             logger.info(f"Closed {clicked_count} popup(s) in {phase} phase")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.5)
         else:
             logger.debug(f"No popups found in {phase} phase")
-        
+
         return clicked_count
     
     async def click_play_button(self, page, context):
@@ -259,13 +357,14 @@ class HLSExtractor:
         # OPTIMIERT: Warte auf Video-Frame mit wait_for_selector statt fester 5s
         logger.info("Waiting for video iframe to load (smart wait)...")
         video_frame = None
-        max_frame_wait = 15000  # 15s timeout (statt feste 5s)
+        max_frame_wait = 15  # 15s timeout
 
         try:
             # Warte bis ein iframe mit Video erscheint
-            start_wait = asyncio.get_event_loop().time()
+            loop = asyncio.get_event_loop()
+            start_wait = loop.time()
 
-            while (asyncio.get_event_loop().time() - start_wait) < (max_frame_wait / 1000):
+            while (loop.time() - start_wait) < max_frame_wait:
                 for frame in page.frames:
                     if frame == page.main_frame:
                         continue
@@ -273,10 +372,9 @@ class HLSExtractor:
                         continue
 
                     try:
-                        # wait_for_selector ist viel effizienter als query_selector + sleep
                         video = await frame.wait_for_selector('video', timeout=2000)
                         if video:
-                            elapsed = asyncio.get_event_loop().time() - start_wait
+                            elapsed = loop.time() - start_wait
                             logger.info(f"Video iframe found in {elapsed:.1f}s!")
                             logger.info(f"Found video iframe: {frame.url[:80]}")
                             video_frame = frame
@@ -286,7 +384,7 @@ class HLSExtractor:
 
                 if video_frame:
                     break
-                await asyncio.sleep(0.5)  # Kurzes Polling zwischen Frame-Checks
+                await asyncio.sleep(0.5)
 
         except Exception as e:
             logger.debug(f"Frame wait error: {e}")
@@ -1164,9 +1262,10 @@ def download_video_sync(m3u8_url, output_path, quality="best"):
     except subprocess.CalledProcessError as e:
         logger.error(f"yt-dlp failed: {e}")
         logger.info("Trying with ffmpeg...")
+        from app.ffmpeg_setup import get_ffmpeg_executable
         try:
             ffmpeg_command = [
-                "ffmpeg",
+                get_ffmpeg_executable(),
                 "-i", m3u8_url,
                 "-c", "copy",
                 "-bsf:a", "aac_adtstoasc",

@@ -235,8 +235,12 @@ class GlobalEpisodeSemaphore:
                     logger.info(f"Global semaphore target set to {new_max} (will take effect as downloads complete)")
 
     def acquire(self, timeout: float = None) -> bool:
-        """Acquire a download slot. Returns True if acquired, False on timeout."""
-        result = self._semaphore.acquire(blocking=True, timeout=timeout)
+        """Acquire a download slot. Returns True if acquired, False on timeout.
+        Use timeout=0 for non-blocking attempt."""
+        if timeout == 0:
+            result = self._semaphore.acquire(blocking=False)
+        else:
+            result = self._semaphore.acquire(blocking=True, timeout=timeout)
         if result:
             with self._lock:
                 self._active_count += 1
@@ -267,6 +271,105 @@ DOWNLOAD_EXECUTOR = ThreadPoolExecutor(
     max_workers=app_config.MAX_PARALLEL_LIMIT + 5,
     thread_name_prefix="DownloadExecutor"
 )
+
+import atexit
+atexit.register(lambda: DOWNLOAD_EXECUTOR.shutdown(wait=False))
+
+
+# ==========================================
+# DYNAMIC PARALLELISM LIMITER
+# ==========================================
+
+class DynamicParallelismLimiter:
+    """
+    Monitors system memory and dynamically adjusts the parallel download limit.
+    Reduces parallelism under memory pressure, restores when memory is available.
+    """
+
+    def __init__(self, semaphore: GlobalEpisodeSemaphore, check_interval: int = 30):
+        self._semaphore = semaphore
+        self._check_interval = check_interval
+        self._configured_max = semaphore.max_concurrent  # User-configured max
+        self._thread: Optional[threading.Thread] = None
+        self._shutdown_event = Event()
+        self._is_running = False
+        # Memory thresholds (percent of total RAM)
+        self._warn_threshold = 75   # Start reducing at 75%
+        self._critical_threshold = 85  # Aggressively reduce at 85%
+        self._recovery_threshold = 65  # Restore when below 65%
+
+    def start(self):
+        if self._is_running:
+            return
+        self._shutdown_event.clear()
+        self._thread = threading.Thread(
+            target=self._monitor_loop,
+            name="ParallelismLimiter",
+            daemon=True
+        )
+        self._is_running = True
+        self._thread.start()
+        logger.info(f"Dynamic parallelism limiter started (thresholds: warn={self._warn_threshold}%, critical={self._critical_threshold}%)")
+
+    def stop(self):
+        self._shutdown_event.set()
+        if self._thread:
+            self._thread.join(timeout=5.0)
+        self._is_running = False
+
+    def update_configured_max(self, new_max: int):
+        """Called when user changes the parallel limit via settings."""
+        self._configured_max = new_max
+
+    def _get_memory_percent(self) -> float:
+        """Get current memory usage percentage."""
+        try:
+            import psutil
+            return psutil.virtual_memory().percent
+        except ImportError:
+            # Fallback: read from /proc/meminfo on Linux
+            try:
+                with open('/proc/meminfo', 'r') as f:
+                    lines = f.readlines()
+                total = int(lines[0].split()[1])
+                available = int(lines[2].split()[1])
+                return (1 - available / total) * 100
+            except Exception:
+                return 0.0  # Can't determine, don't limit
+
+    def _monitor_loop(self):
+        while not self._shutdown_event.is_set():
+            try:
+                mem_pct = self._get_memory_percent()
+                current_max = self._semaphore.max_concurrent
+
+                if mem_pct >= self._critical_threshold:
+                    # Critical: reduce to 1
+                    target = 1
+                    if current_max > target:
+                        logger.warning(f"Memory critical ({mem_pct:.0f}%), reducing parallel to {target}")
+                        self._semaphore.update_max(target)
+                elif mem_pct >= self._warn_threshold:
+                    # Warning: reduce by half (but minimum 1)
+                    target = max(1, self._configured_max // 2)
+                    if current_max > target:
+                        logger.warning(f"Memory high ({mem_pct:.0f}%), reducing parallel to {target}")
+                        self._semaphore.update_max(target)
+                elif mem_pct < self._recovery_threshold:
+                    # Recovery: restore to configured max
+                    if current_max < self._configured_max:
+                        logger.info(f"Memory recovered ({mem_pct:.0f}%), restoring parallel to {self._configured_max}")
+                        self._semaphore.update_max(self._configured_max)
+
+            except Exception as e:
+                logger.debug(f"Parallelism limiter error: {e}")
+
+            self._shutdown_event.wait(timeout=self._check_interval)
+
+
+# Initialize the dynamic limiter
+dynamic_limiter = DynamicParallelismLimiter(global_episode_semaphore)
+
 
 # ==========================================
 # ROBUST QUEUE PROCESSOR CLASS
@@ -643,6 +746,9 @@ class RobustQueueProcessor:
         old_max = global_episode_semaphore.max_concurrent
         global_episode_semaphore.update_max(new_max)
 
+        # Update dynamic limiter's configured max so it knows the user's intent
+        dynamic_limiter.update_configured_max(new_max)
+
         # Also update local reference (for stats/display purposes)
         with self._lock:
             self.max_parallel = new_max
@@ -675,6 +781,7 @@ class BackgroundAutoScraper:
     - Runs only when no downloads are active
     - Prioritizes expired/expiring cache entries
     - Scrapes uncached series from catalog
+    - Parallel batch scraping with ThreadPoolExecutor
     - Rate-limited to avoid overloading
     - Graceful shutdown support
     """
@@ -692,6 +799,7 @@ class BackgroundAutoScraper:
         self._scrape_interval_seconds = Config.AUTO_SCRAPER_INTERVAL
         self._batch_size = Config.AUTO_SCRAPER_BATCH_SIZE
         self._min_idle_between_scrapes = Config.AUTO_SCRAPER_MIN_IDLE
+        self._max_parallel_scrapes = min(3, self._batch_size)  # Max parallel scrapes
 
         # Statistics
         self._stats = {
@@ -706,6 +814,7 @@ class BackgroundAutoScraper:
         # Scraping state
         self._last_scrape_time = None
         self._currently_scraping = None
+        self._scrape_executor = None
 
     @property
     def is_running(self) -> bool:
@@ -829,7 +938,7 @@ class BackgroundAutoScraper:
         logger.info("Auto-Scraper loop ended")
 
     def _perform_scrape_cycle(self):
-        """Perform one scrape cycle."""
+        """Perform one scrape cycle with parallel batch scraping."""
         with self._lock:
             self._stats['current_status'] = 'scraping'
 
@@ -838,35 +947,21 @@ class BackgroundAutoScraper:
             series_to_update = get_series_needing_update(limit=self._batch_size)
 
             if series_to_update:
-                logger.info(f"Auto-Scraper: Found {len(series_to_update)} series needing update")
-                for series_info in series_to_update:
-                    if self._shutdown_event.is_set() or not self._is_system_idle():
-                        logger.info("Auto-Scraper paused (download started or shutdown)")
-                        break
-
-                    slug = series_info['series_slug']
-                    status = series_info.get('status', 'unknown')
-                    self._scrape_series(slug, reason=f"cache_{status}")
-
-                    # Wait between scrapes
-                    self._shutdown_event.wait(timeout=self._min_idle_between_scrapes)
+                slugs_with_reasons = [
+                    (info['series_slug'], f"cache_{info.get('status', 'unknown')}")
+                    for info in series_to_update
+                ]
+                logger.info(f"Auto-Scraper: Found {len(slugs_with_reasons)} series needing update")
+                self._scrape_batch(slugs_with_reasons)
 
             # Priority 2: Scrape uncached series from catalog (if still idle)
             elif self._is_system_idle():
                 uncached = get_uncached_series_from_catalog()
                 if uncached:
-                    # Scrape a few uncached series
-                    to_scrape = uncached[:self._batch_size]
+                    to_scrape = [(slug, "new_series") for slug in uncached[:self._batch_size]]
                     logger.info(f"Auto-Scraper: Found {len(uncached)} uncached series, scraping {len(to_scrape)}")
-
-                    for slug in to_scrape:
-                        if self._shutdown_event.is_set() or not self._is_system_idle():
-                            break
-
-                        self._scrape_series(slug, reason="new_series")
-                        self._shutdown_event.wait(timeout=self._min_idle_between_scrapes)
+                    self._scrape_batch(to_scrape)
                 else:
-                    # Check if catalog exists and has content
                     catalog_needs_refresh = self._check_catalog_needs_refresh()
                     if catalog_needs_refresh:
                         logger.info("Auto-Scraper: Catalog empty or stale, refreshing...")
@@ -886,6 +981,40 @@ class BackgroundAutoScraper:
 
         with self._lock:
             self._stats['current_status'] = 'idle'
+
+    def _scrape_batch(self, slugs_with_reasons: list):
+        """Scrape multiple series in parallel using ThreadPoolExecutor."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Split into chunks of max_parallel_scrapes
+        for i in range(0, len(slugs_with_reasons), self._max_parallel_scrapes):
+            if self._shutdown_event.is_set() or not self._is_system_idle():
+                logger.info("Auto-Scraper: Batch interrupted (download started or shutdown)")
+                break
+
+            batch = slugs_with_reasons[i:i + self._max_parallel_scrapes]
+            batch_slugs = [s for s, _ in batch]
+
+            with self._lock:
+                self._currently_scraping = batch_slugs if len(batch_slugs) > 1 else batch_slugs[0]
+
+            logger.info(f"Auto-Scraper: Parallel batch [{i+1}-{i+len(batch)}/{len(slugs_with_reasons)}]: {batch_slugs}")
+
+            with ThreadPoolExecutor(max_workers=self._max_parallel_scrapes, thread_name_prefix="scraper") as executor:
+                futures = {
+                    executor.submit(self._scrape_series, slug, reason): slug
+                    for slug, reason in batch
+                }
+                for future in as_completed(futures):
+                    slug = futures[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"Auto-Scraper: Batch scrape failed for '{slug}': {e}")
+
+            # Brief pause between batches
+            if i + self._max_parallel_scrapes < len(slugs_with_reasons):
+                self._shutdown_event.wait(timeout=self._min_idle_between_scrapes)
 
     def _scrape_series(self, series_slug: str, reason: str = ""):
         """Scrape a single series and update cache."""
@@ -982,43 +1111,34 @@ class BackgroundAutoScraper:
 
         return False
 
-    def _refresh_catalog(self):
-        """Refresh the series catalog."""
+    def _scrape_single_catalog(self, source_id: str):
+        """Scrape and save a single catalog source."""
         from app.series_catalog import scrape_catalog, save_catalog_cache
 
+        logger.info(f"Auto-Scraper: Scraping {source_id} catalog...")
+        loop = asyncio.new_event_loop()
+        try:
+            catalog = loop.run_until_complete(scrape_catalog(source_id))
+            if catalog and catalog.get('genres'):
+                save_catalog_cache(catalog, source_id)
+                logger.info(f"Auto-Scraper: {source_id.capitalize()} catalog updated ({catalog.get('total_items', 0)} items)")
+        except Exception as e:
+            logger.error(f"Auto-Scraper: Failed to scrape {source_id} catalog: {e}")
+        finally:
+            loop.close()
+
+    def _refresh_catalog(self):
+        """Refresh the series and anime catalogs."""
         with self._lock:
             self._stats['current_status'] = 'refreshing_catalog'
 
         try:
-            # Scrape series catalog
-            logger.info("Auto-Scraper: Scraping series catalog...")
-            loop = asyncio.new_event_loop()
-            try:
-                catalog = loop.run_until_complete(scrape_catalog('series'))
-                if catalog and catalog.get('genres'):
-                    save_catalog_cache(catalog, 'series')
-                    logger.info(f"Auto-Scraper: Series catalog updated ({catalog.get('total_items', 0)} items)")
-            except Exception as e:
-                logger.error(f"Auto-Scraper: Failed to scrape series catalog: {e}")
-            finally:
-                loop.close()
+            self._scrape_single_catalog('series')
 
-            # Brief pause
             self._shutdown_event.wait(timeout=5.0)
 
-            # Scrape anime catalog if still idle
             if self._is_system_idle() and not self._shutdown_event.is_set():
-                logger.info("Auto-Scraper: Scraping anime catalog...")
-                loop = asyncio.new_event_loop()
-                try:
-                    catalog = loop.run_until_complete(scrape_catalog('anime'))
-                    if catalog and catalog.get('genres'):
-                        save_catalog_cache(catalog, 'anime')
-                        logger.info(f"Auto-Scraper: Anime catalog updated ({catalog.get('total_items', 0)} items)")
-                except Exception as e:
-                    logger.error(f"Auto-Scraper: Failed to scrape anime catalog: {e}")
-                finally:
-                    loop.close()
+                self._scrape_single_catalog('anime')
 
         except Exception as e:
             logger.error(f"Auto-Scraper: Catalog refresh error: {e}")
@@ -1561,7 +1681,8 @@ def _verify_downloaded_file(output_path, logger=None):
         return
     if logger:
         logger.log("🔍 Verifying file integrity...", "info")
-    verifier = FileVerifier()
+    from app.ffmpeg_setup import get_ffprobe_executable
+    verifier = FileVerifier(ffprobe_path=get_ffprobe_executable())
     verification = verifier.verify_file(str(output_path))
     if verification.is_valid:
         if logger:
@@ -1702,6 +1823,8 @@ def download_video_with_progress(m3u8_url, output_path, quality="best", codec="a
             logger.log("⚠️ yt-dlp failed, trying ffmpeg...", "warning")
 
         # Fallback to ffmpeg
+        from app.ffmpeg_setup import get_ffmpeg_executable
+        ffmpeg_bin = get_ffmpeg_executable()
         try:
             if audio_only:
                 # Map audio format to ffmpeg codec
@@ -1722,7 +1845,7 @@ def download_video_with_progress(m3u8_url, output_path, quality="best", codec="a
 
                 # FFmpeg audio extraction
                 ffmpeg_command = [
-                    "ffmpeg",
+                    ffmpeg_bin,
                     "-i", m3u8_url,
                     "-vn",  # No video
                     "-acodec", codec_name,
@@ -1735,7 +1858,7 @@ def download_video_with_progress(m3u8_url, output_path, quality="best", codec="a
             else:
                 # Standard video download
                 ffmpeg_command = [
-                    "ffmpeg",
+                    ffmpeg_bin,
                     "-i", m3u8_url,
                     "-c", "copy",
                     "-bsf:a", "aac_adtstoasc",
@@ -1777,7 +1900,7 @@ def download_video_with_progress(m3u8_url, output_path, quality="best", codec="a
                             # Update progress display continuously
                             if logger:
                                 logger.log_progress(f"📊 FFmpeg: {int(percent)}%", "info")
-                    except:
+                    except Exception:
                         pass
 
             return_code = process.wait()
@@ -1896,14 +2019,23 @@ async def process_episode_with_semaphore(ep_num, base_url, season, args, episode
         return None
 
     # Log when waiting for global semaphore
-    available = global_episode_semaphore.available_slots
     active = global_episode_semaphore.active_count
     logger.info(f"{episode_key} waiting for global slot... (active: {active}/{global_episode_semaphore.max_concurrent})")
 
-    # Acquire global semaphore slot (blocking in thread context)
-    # Use run_in_executor to avoid blocking the event loop
+    # Acquire global semaphore slot using non-blocking polling to avoid wasting executor threads
+    acquired = False
     loop = asyncio.get_event_loop()
-    acquired = await loop.run_in_executor(None, lambda: global_episode_semaphore.acquire(timeout=3600))
+    deadline = loop.time() + 3600
+    while loop.time() < deadline:
+        if global_episode_semaphore.acquire(timeout=0):
+            acquired = True
+            break
+        # Check cancellation while waiting
+        if cancel_check and cancel_check():
+            if logger:
+                logger.log(f"{browser_id} ⏹️ {episode_key} cancelled while waiting for slot", "warning")
+            return None
+        await asyncio.sleep(0.5)
 
     if not acquired:
         if logger:
@@ -1998,7 +2130,7 @@ async def process_download_async(session_id, url, options):
         # Parse season range if provided
         seasons_to_download = []
         if options.get('seasons'):
-            season_range = options['seasons']
+            season_range = str(options['seasons'])
             if season_range.lower() == 'all':
                 # Auto-detect all seasons
                 logger.log("Detecting all available seasons...", "info")
@@ -2020,7 +2152,7 @@ async def process_download_async(session_id, url, options):
             seasons_to_download = [1]
 
         # Handle different URL types (skip if using visual selector or batch mode with seasons='all')
-        if not options.get('episodes_per_season') and not (options.get('seasons') and options['seasons'].lower() == 'all'):
+        if not options.get('episodes_per_season') and not (options.get('seasons') and str(options['seasons']).lower() == 'all'):
             if url_type == 'series':
                 # No season specified
                 if options.get('season'):
@@ -2102,29 +2234,39 @@ async def process_download_async(session_id, url, options):
             seasons_to_download.sort()
         else:
             # Fallback to old method
-            for season_num in seasons_to_download:
-                # Parse episodes for this season to count them
-                if options.get('episodes'):
-                    episode_range = options['episodes']
-                    if episode_range.lower() == 'all':
-                        # Auto-detect all episodes for this season
-                        season_url = f"{base_url}/staffel-{season_num}"
-                        _, available_episodes = await detect_series_info(season_url)
+            if options.get('episodes'):
+                episode_range = str(options['episodes'])
+                if episode_range.lower() == 'all':
+                    # Parallel detection of all seasons' episodes
+                    async def detect_season_episodes(s_num):
+                        season_url = f"{base_url}/staffel-{s_num}"
+                        _, avail = await detect_series_info(season_url)
+                        return s_num, avail
+
+                    detection_tasks = [detect_season_episodes(s) for s in seasons_to_download]
+                    detection_results = await asyncio.gather(*detection_tasks, return_exceptions=True)
+
+                    for result in detection_results:
+                        if isinstance(result, Exception):
+                            continue
+                        s_num, available_episodes = result
                         if available_episodes:
-                            episodes_per_season[season_num] = available_episodes
+                            episodes_per_season[s_num] = available_episodes
                             total_episodes_all_seasons += len(available_episodes)
                         else:
-                            logger.log(f"Could not detect episodes for Season {season_num}", "warning")
-                            episodes_per_season[season_num] = []
-                    else:
-                        episodes = parse_episode_range(episode_range)
+                            logger.log(f"Could not detect episodes for Season {s_num}", "warning")
+                            episodes_per_season[s_num] = []
+                else:
+                    episodes = parse_episode_range(episode_range)
+                    for season_num in seasons_to_download:
                         episodes_per_season[season_num] = episodes
                         total_episodes_all_seasons += len(episodes)
-                elif start_episode:
-                    episodes_per_season[season_num] = [start_episode]
-                    total_episodes_all_seasons += 1
-                else:
-                    episodes_per_season[season_num] = [1]
+            else:
+                for season_num in seasons_to_download:
+                    if start_episode:
+                        episodes_per_season[season_num] = [start_episode]
+                    else:
+                        episodes_per_season[season_num] = [1]
                     total_episodes_all_seasons += 1
 
         # Set global total
@@ -2744,7 +2886,8 @@ async def process_download_async(session_id, url, options):
                         logger.log(f"🗑️ Removed retry item (merged into original)", "info")
 
     except Exception as e:
-        active_downloads[session_id]['status'] = 'error'
+        if session_id in active_downloads:
+            active_downloads[session_id]['status'] = 'error'
         socketio.emit('status', {
             'session_id': session_id,
             'status': 'error',
@@ -2753,8 +2896,9 @@ async def process_download_async(session_id, url, options):
 
 
 def run_download_thread(session_id, url, options):
-    """Run download in a separate thread with asyncio"""
+    """Run download in a separate thread with its own asyncio event loop"""
     loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(process_download_async(session_id, url, options))
     finally:
@@ -2912,9 +3056,10 @@ def start_queue_processor():
     # Use the new robust processor
     started = queue_processor.start()
 
-    # Start the background auto-scraper
+    # Start the background auto-scraper and dynamic limiter
     if started:
         auto_scraper.start()
+        dynamic_limiter.start()
 
     return started
 
@@ -2925,8 +3070,9 @@ def stop_queue_processor(timeout: float = 30.0):
     """
     logger.info(f"stop_queue_processor() called")
 
-    # Stop auto-scraper first
+    # Stop auto-scraper and dynamic limiter first
     auto_scraper.stop(timeout=10.0)
+    dynamic_limiter.stop()
 
     stopped = queue_processor.stop(timeout=timeout)
 

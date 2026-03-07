@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 if sys.platform == 'win32':
     try:
         sys.stdout.reconfigure(encoding='utf-8')
-    except:
+    except Exception:
         pass
 
 from app.config import Config, PROJECT_ROOT
@@ -130,43 +130,44 @@ async def scrape_catalog(source='series', max_workers=3) -> Dict:
             # The new structure uses h3.h5 headers for both genre and alphabetic views
             logger.info("Extracting catalog structure...")
             context2 = await browser.new_context()
-            page2 = await context2.new_page()
-            await page2.set_content(html_content)
+            try:
+                page2 = await context2.new_page()
+                await page2.set_content(html_content)
 
-            # Extract using the new unified structure (h3.h5 + ul.series-list)
-            genres_raw = await page2.evaluate('''
-                () => {
-                    const results = [];
-                    const headers = document.querySelectorAll('h3.h5');
+                # Extract using the new unified structure (h3.h5 + ul.series-list)
+                genres_raw = await page2.evaluate('''
+                    () => {
+                        const results = [];
+                        const headers = document.querySelectorAll('h3.h5');
 
-                    headers.forEach(header => {
-                        const categoryName = header.textContent.trim();
+                        headers.forEach(header => {
+                            const categoryName = header.textContent.trim();
 
-                        // Find the corresponding series list
-                        const seriesList = header.parentElement.nextElementSibling;
-                        if (!seriesList || !seriesList.classList.contains('series-list')) return;
+                            // Find the corresponding series list
+                            const seriesList = header.parentElement.nextElementSibling;
+                            if (!seriesList || !seriesList.classList.contains('series-list')) return;
 
-                        const links = seriesList.querySelectorAll('li.series-item a');
-                        const series = [];
+                            const links = seriesList.querySelectorAll('li.series-item a');
+                            const series = [];
 
-                        links.forEach(link => {
-                            series.push({
-                                name: link.textContent.trim(),
-                                href: link.getAttribute('href'),
-                                alternative_titles: link.parentElement.getAttribute('data-search') || ''
+                            links.forEach(link => {
+                                series.push({
+                                    name: link.textContent.trim(),
+                                    href: link.getAttribute('href'),
+                                    alternative_titles: link.parentElement.getAttribute('data-search') || ''
+                                });
                             });
+
+                            if (series.length > 0) {
+                                results.push({ genre: categoryName, series: series });
+                            }
                         });
 
-                        if (series.length > 0) {
-                            results.push({ genre: categoryName, series: series });
-                        }
-                    });
-
-                    return results;
-                }
-            ''')
-
-            await context2.close()
+                        return results;
+                    }
+                ''')
+            finally:
+                await context2.close()
 
             # Step 3: Process extracted data in parallel batches
             logger.info(f"Found {len(genres_raw)} genre categories")

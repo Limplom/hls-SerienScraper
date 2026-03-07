@@ -98,10 +98,13 @@ async function saveSettings() {
         if (result.success) {
             showNotification('✅ Settings saved successfully!', 'success');
 
-            // Show restart notice for certain settings
+            // Show restart notice if restart-relevant settings changed
             if (needsRestart(settings)) {
                 document.getElementById('restartNotice').style.display = 'block';
             }
+
+            // Update original settings to reflect saved state
+            originalSettings = { ...settings };
         } else {
             showNotification('❌ Error saving settings: ' + (result.error || 'Unknown error'), 'error');
         }
@@ -111,15 +114,16 @@ async function saveSettings() {
     }
 }
 
-// Check if settings require restart
-function needsRestart(settings) {
-    const restartRequired = [
-        'browser_headless',
-        'browser_max_context_uses'
-    ];
+// Check if settings require restart by comparing with original values
+let originalSettings = null;
 
-    // Simple check - in reality you'd compare with original values
-    return restartRequired.some(key => key in settings);
+function needsRestart(settings) {
+    if (!originalSettings) return false;
+
+    const restartRequired = ['browser_headless', 'browser_max_context_uses'];
+    return restartRequired.some(key =>
+        key in settings && key in originalSettings && settings[key] !== originalSettings[key]
+    );
 }
 
 // Reset to default settings
@@ -218,8 +222,8 @@ async function restartServer() {
             // Poll until server is back up, then reload
             const checkServer = setInterval(async () => {
                 try {
-                    const res = await fetch('/api/settings/save', {
-                        method: 'HEAD',
+                    const res = await fetch('/settings', {
+                        method: 'GET',
                         signal: AbortSignal.timeout(2000)
                     });
                     // Server is back
@@ -253,7 +257,7 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-// Initialize tooltips or other UI enhancements on page load
+// Capture original settings on page load for restart detection
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('Settings page loaded');
+    originalSettings = collectFormData();
 });

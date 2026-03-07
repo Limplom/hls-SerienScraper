@@ -232,10 +232,16 @@ class DownloadQueueManager:
             # Get existing episodes from options
             existing_eps = item.options.get('episodes_per_season', {})
             # Convert string keys to int if needed
-            existing_eps = {int(k): v for k, v in existing_eps.items()}
+            try:
+                existing_eps = {int(k): v for k, v in existing_eps.items()}
+            except (ValueError, TypeError):
+                existing_eps = {}
 
             for season, episodes in new_episodes_per_season.items():
-                season = int(season)
+                try:
+                    season = int(season)
+                except (ValueError, TypeError):
+                    continue
                 if season not in existing_eps:
                     existing_eps[season] = []
 
@@ -452,7 +458,7 @@ class DownloadQueueManager:
                             # Time to start this download
                             item.status = DownloadStatus.QUEUED
                             scheduled_ready.append(item)
-                    except:
+                    except Exception:
                         pass
 
             if scheduled_ready:
@@ -637,7 +643,7 @@ class DownloadQueueManager:
                 import shutil
                 shutil.copy(self.persist_path, backup_path)
                 logger.info(f"Corrupted queue backed up to: {backup_path}")
-            except:
+            except Exception:
                 pass
             logger.info("Starting with empty queue")
             self.queue = []

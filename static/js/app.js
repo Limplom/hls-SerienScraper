@@ -965,7 +965,7 @@ function updateLanguageSelectorForSelectedEpisodes() {
 
     // Collect languages from all selected episodes
     const languageCounts = new Map(); // key -> { lang: {...}, count: number }
-    let totalSelected = 0;
+    let episodesWithLanguageData = 0;
 
     selectedEpisodes.forEach(({ season, episode }) => {
         // Determine if this is a regular season or extra tab
@@ -988,17 +988,19 @@ function updateLanguageSelectorForSelectedEpisodes() {
                     languageCounts.get(key).count++;
                 }
             });
-            totalSelected++;
+            episodesWithLanguageData++;
         }
     });
 
-    // Only show languages that are available for ALL selected episodes
+    // Only show languages that are available for ALL selected episodes with language data
     const commonLanguages = [];
-    languageCounts.forEach((data, key) => {
-        if (data.count === totalSelected) {
-            commonLanguages.push(data.lang);
-        }
-    });
+    if (episodesWithLanguageData > 0) {
+        languageCounts.forEach((data, key) => {
+            if (data.count === episodesWithLanguageData) {
+                commonLanguages.push(data.lang);
+            }
+        });
+    }
 
     // If we couldn't find per-episode languages, fall back to series-level languages
     if (commonLanguages.length === 0 && cachedSeriesData.languages) {

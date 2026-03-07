@@ -168,7 +168,7 @@ class BrowserPool:
                     logger.debug(f"Recycling browser context after {self._max_context_uses} uses")
                     try:
                         await context.close()
-                    except:
+                    except Exception:
                         pass
 
                     # Create fresh context
@@ -207,7 +207,7 @@ class BrowserPool:
             for page in context.pages:
                 try:
                     await page.close()
-                except:
+                except Exception:
                     pass
 
         except Exception as e:
@@ -224,7 +224,7 @@ class BrowserPool:
                     self._context_use_count[id(new_context)] = 0
 
                 context = new_context
-            except:
+            except Exception:
                 pass
 
         # Put back in queue
@@ -241,21 +241,21 @@ class BrowserPool:
         for context in self.contexts:
             try:
                 await context.close()
-            except:
+            except Exception:
                 pass
 
         # Close browser
         if self.browser:
             try:
                 await self.browser.close()
-            except:
+            except Exception:
                 pass
 
         # Stop playwright
         if self.playwright:
             try:
                 await self.playwright.stop()
-            except:
+            except Exception:
                 pass
 
         self.contexts.clear()
@@ -316,7 +316,7 @@ class PooledPageContext:
         if self.page:
             try:
                 await self.page.close()
-            except:
+            except Exception:
                 pass
 
         if self.context:

@@ -70,8 +70,9 @@ def main():
     print("🌐 Starting Web Server")
     print("=" * 60)
     print()
+    from app.config import Config
     print(f"📍 Server URL: http://{HOST}:{PORT}")
-    print("📁 Downloads folder: ./Downloads/")
+    print(f"📁 Downloads folder: {Config.get_download_path()}")
     print(f"🔧 Debug mode: {DEBUG}")
     print()
     print("Press Ctrl+C to stop the server")

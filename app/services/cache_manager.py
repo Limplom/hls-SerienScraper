@@ -19,6 +19,16 @@ logger = logging.getLogger(__name__)
 class CacheManager:
     """Enhanced caching system with episode-level caching and cover image storage"""
 
+    # Shared requests session for connection pooling
+    _session = None
+
+    @classmethod
+    def _get_session(cls) -> requests.Session:
+        if cls._session is None:
+            cls._session = requests.Session()
+            cls._session.headers.update({'User-Agent': 'Mozilla/5.0'})
+        return cls._session
+
     def __init__(self, cache_dir: str = './cache'):
         """
         Initialize cache manager
@@ -188,7 +198,7 @@ class CacheManager:
 
         # Download image
         try:
-            response = requests.get(image_url, timeout=10)
+            response = self._get_session().get(image_url, timeout=10)
             if response.status_code == 200:
                 return self.cache_cover_image(image_url, response.content)
         except Exception:
@@ -273,18 +283,24 @@ class CacheManager:
     # ==========================================
 
     def _add_to_hot_cache(self, key: str, data: Dict[str, Any]):
-        """Add item to hot cache (LRU-style)"""
-        # Remove oldest if cache is full
-        if len(self._hot_cache) >= self._hot_cache_max_size:
-            # Remove first item (oldest)
+        """Add item to hot cache with LRU eviction"""
+        # Move to end if already exists (mark as recently used)
+        if key in self._hot_cache:
+            self._hot_cache.pop(key)
+        elif len(self._hot_cache) >= self._hot_cache_max_size:
+            # Evict oldest (first) item
             oldest_key = next(iter(self._hot_cache))
             del self._hot_cache[oldest_key]
 
         self._hot_cache[key] = data
 
     def get_hot_cache_item(self, key: str) -> Optional[Any]:
-        """Get item from hot cache"""
-        return self._hot_cache.get(key)
+        """Get item from hot cache (moves to end for LRU)"""
+        if key in self._hot_cache:
+            # Move to end (recently accessed)
+            self._hot_cache[key] = self._hot_cache.pop(key)
+            return self._hot_cache[key]
+        return None
 
     def clear_hot_cache(self):
         """Clear in-memory hot cache"""
@@ -364,36 +380,43 @@ class CacheManager:
 
         # Cleanup metadata
         for cache_file in self.metadata_dir.glob('*.json'):
-            if self._is_expired(cache_file, self.default_ttl['episode']):
-                cache_file.unlink()
-                removed_count += 1
+            try:
+                if self._is_expired(cache_file, self.default_ttl['episode']):
+                    cache_file.unlink(missing_ok=True)
+                    removed_count += 1
+            except OSError:
+                pass
 
         # Cleanup images
         for image_file in self.images_dir.glob('*'):
-            if self._is_expired(image_file, self.default_ttl['cover_image']):
-                image_file.unlink()
-                removed_count += 1
+            try:
+                if self._is_expired(image_file, self.default_ttl['cover_image']):
+                    image_file.unlink(missing_ok=True)
+                    removed_count += 1
+            except OSError:
+                pass
 
         # Cleanup HTTP responses
         for cache_file in self.http_cache_dir.glob('*.json'):
-            if self._is_expired(cache_file, self.default_ttl['http_response']):
-                cache_file.unlink()
-                removed_count += 1
+            try:
+                if self._is_expired(cache_file, self.default_ttl['http_response']):
+                    cache_file.unlink(missing_ok=True)
+                    removed_count += 1
+            except OSError:
+                pass
 
         logger.info(f"Cleaned up {removed_count} expired cache entries")
         return removed_count
 
     def clear_all(self):
         """Clear all caches"""
-        import shutil
-
         # Clear disk caches
         for cache_file in self.images_dir.glob('*'):
-            cache_file.unlink()
+            cache_file.unlink(missing_ok=True)
         for cache_file in self.metadata_dir.glob('*.json'):
-            cache_file.unlink()
+            cache_file.unlink(missing_ok=True)
         for cache_file in self.http_cache_dir.glob('*.json'):
-            cache_file.unlink()
+            cache_file.unlink(missing_ok=True)
 
         # Clear hot cache
         self.clear_hot_cache()

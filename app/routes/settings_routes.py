@@ -10,6 +10,8 @@ import logging
 from pathlib import Path
 import traceback
 
+from app.config import Config
+
 logger = logging.getLogger(__name__)
 
 settings_bp = Blueprint('settings', __name__)
@@ -73,10 +75,15 @@ def save_settings():
         from app.config import PROJECT_ROOT
 
         new_settings = request.json
+        if not new_settings:
+            return jsonify({
+                'success': False,
+                'error': 'No settings provided'
+            }), 400
 
-        # Validate settings
+        # Validate settings against configured limit
         if 'max_parallel_downloads' in new_settings:
-            max_val = new_settings.get('max_parallel_limit', 25)
+            max_val = new_settings.get('max_parallel_limit', Config.MAX_PARALLEL_LIMIT)
             if not (1 <= new_settings['max_parallel_downloads'] <= max_val):
                 return jsonify({
                     'success': False,

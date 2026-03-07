@@ -58,6 +58,7 @@ def get_catalog():
     logger.info(f"Scraping fresh {source} catalog...")
     try:
         loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
             catalog_data = loop.run_until_complete(scrape_catalog(source))
         finally:

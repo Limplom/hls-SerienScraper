@@ -111,17 +111,17 @@ class Config:
 
     AUTO_SCRAPER_INTERVAL = int(os.getenv(
         'HLS_AUTO_SCRAPER_INTERVAL',
-        _auto_scraper_settings.get('scrape_interval_seconds', 60)
+        _auto_scraper_settings.get('scrape_interval_seconds', 25)
     ))
 
     AUTO_SCRAPER_BATCH_SIZE = int(os.getenv(
         'HLS_AUTO_SCRAPER_BATCH_SIZE',
-        _auto_scraper_settings.get('batch_size', 3)
+        _auto_scraper_settings.get('batch_size', 10)
     ))
 
     AUTO_SCRAPER_MIN_IDLE = int(os.getenv(
         'HLS_AUTO_SCRAPER_MIN_IDLE',
-        _auto_scraper_settings.get('min_idle_between_scrapes', 10)
+        _auto_scraper_settings.get('min_idle_between_scrapes', 5)
     ))
 
     # ===========================================
@@ -143,7 +143,7 @@ class Config:
     # - headless: true = completely invisible (faster, but may be detected by some sites)
     BROWSER_HEADLESS = os.getenv(
         'BROWSER_HEADLESS',
-        str(_json_settings.get('browser_headless', False))
+        str(_json_settings.get('browser_headless', True))
     ).lower() in ('true', '1', 'yes')
 
     # Timeouts (in milliseconds)
