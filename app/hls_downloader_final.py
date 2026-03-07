@@ -77,12 +77,15 @@ class HLSExtractor:
         self.ad_filters = set()
         self._m3u8_event = None  # Event for instant m3u8 detection (created per extraction)
     
+    # Filter update interval: 24 hours
+    FILTER_UPDATE_INTERVAL = 86400
+
     def load_brave_filters(self):
-        """Lädt Brave-kompatible Filterlisten"""
+        """Lädt erweiterte Filterlisten mit automatischem 24h-Update"""
         filter_cache = app_config.PROJECT_ROOT / "filter_cache"
         filter_cache.mkdir(exist_ok=True)
 
-        # Multiple URLs for redundancy (primary and fallback)
+        # Extended filter lists for better ad/tracker blocking
         filter_lists = {
             'easylist': [
                 'https://easylist-downloads.adblockplus.org/easylist.txt',
@@ -92,18 +95,28 @@ class HLSExtractor:
                 'https://easylist-downloads.adblockplus.org/easyprivacy.txt',
                 'https://easylist.to/easylist/easyprivacy.txt'
             ],
+            'easylist_germany': [
+                'https://easylist-downloads.adblockplus.org/easylistgermany.txt',
+            ],
+            'adguard_base': [
+                'https://filters.adtidy.org/extension/chromium/filters/2.txt',
+            ],
+            'adguard_tracking': [
+                'https://filters.adtidy.org/extension/chromium/filters/3.txt',
+            ],
+            'adguard_annoyances': [
+                'https://filters.adtidy.org/extension/chromium/filters/14.txt',
+            ],
         }
 
+        updated_count = 0
         for name, urls in filter_lists.items():
             cache_file = filter_cache / f"{name}.txt"
 
-            should_download = False
-            if not cache_file.exists():
-                should_download = True
-            else:
+            should_download = not cache_file.exists()
+            if not should_download:
                 file_age = time.time() - cache_file.stat().st_mtime
-                if file_age > 604800:  # 7 days
-                    should_download = True
+                should_download = file_age > self.FILTER_UPDATE_INTERVAL
 
             if should_download:
                 downloaded = False
@@ -111,39 +124,43 @@ class HLSExtractor:
                     try:
                         urllib.request.urlretrieve(url, cache_file)
                         downloaded = True
+                        updated_count += 1
                         break
                     except Exception:
                         continue
 
-                if not downloaded:
-                    # Silently skip if all downloads failed and no cache exists
-                    if not cache_file.exists():
+                if not downloaded and not cache_file.exists():
+                    continue
+
+            self._parse_filter_file(cache_file, name)
+
+        if updated_count > 0:
+            logger.info(f"Updated {updated_count} filter list(s)")
+        logger.info(f"Loaded {len(self.ad_filters)} filter rules from {len(filter_lists)} lists")
+        return len(self.ad_filters) > 0
+
+    def _parse_filter_file(self, cache_file: Path, name: str):
+        """Parse a single adblock filter file and extract domain rules."""
+        try:
+            with open(cache_file, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('!') or line.startswith('['):
                         continue
-            
-            try:
-                with open(cache_file, 'r', encoding='utf-8', errors='ignore') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line or line.startswith('!') or line.startswith('['):
-                            continue
-                        
-                        if '||' in line:
-                            domain = line.replace('||', '').split('^')[0].split('/')[0].split('$')[0]
+
+                    if '||' in line:
+                        domain = line.replace('||', '').split('^')[0].split('/')[0].split('$')[0]
+                        if domain and '.' in domain:
+                            self.ad_filters.add(domain.lower())
+                    elif line.startswith('|https://') or line.startswith('|http://'):
+                        try:
+                            domain = line.split('://')[1].split('/')[0].split('$')[0]
                             if domain and '.' in domain:
                                 self.ad_filters.add(domain.lower())
-                        elif line.startswith('|https://') or line.startswith('|http://'):
-                            try:
-                                domain = line.split('://')[1].split('/')[0].split('$')[0]
-                                if domain and '.' in domain:
-                                    self.ad_filters.add(domain.lower())
-                            except (IndexError, ValueError):
-                                # Malformed filter line, skip silently
-                                pass
-            except Exception as e:
-                logger.warning(f"Error parsing {name}: {e}")
-        
-        logger.info(f"Loaded {len(self.ad_filters)} filter rules")
-        return len(self.ad_filters) > 0
+                        except (IndexError, ValueError):
+                            pass
+        except Exception as e:
+            logger.warning(f"Error parsing filter list {name}: {e}")
     
     async def close_new_tabs(self, context: BrowserContext, main_page: Page) -> int:
         """Schließt alle neuen Tabs (Werbung) außer der Hauptseite"""

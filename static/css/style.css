@@ -1,4 +1,4 @@
-/* Modern Dark Theme for HLS Downloader */
+/* HLS Downloader Theme - Dark/Light Mode */
 
 :root {
     --primary-color: #6366f1;
@@ -14,6 +14,70 @@
     --border-color: #334155;
     --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
     --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+[data-theme="light"] {
+    --bg-dark: #f1f5f9;
+    --bg-card: #ffffff;
+    --bg-input: #e2e8f0;
+    --text-primary: #1e293b;
+    --text-secondary: #64748b;
+    --border-color: #cbd5e1;
+    --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.05), 0 4px 6px -2px rgba(0, 0, 0, 0.03);
+}
+
+[data-theme="light"] body {
+    background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%);
+}
+
+/* Theme toggle button */
+.theme-toggle {
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    cursor: pointer;
+    padding: 0.4rem 0.6rem;
+    border-radius: 8px;
+    font-size: 1.1rem;
+    transition: all 0.2s;
+    line-height: 1;
+}
+
+.theme-toggle:hover {
+    background: var(--primary-color);
+    color: white;
+}
+
+/* Global loading indicator bar */
+.global-loading-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 3px;
+    z-index: 9999;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.global-loading-bar.active {
+    opacity: 1;
+}
+
+.global-loading-bar .bar {
+    height: 100%;
+    width: 30%;
+    background: linear-gradient(90deg, var(--primary-color), #8b5cf6);
+    border-radius: 0 2px 2px 0;
+    animation: loading-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes loading-slide {
+    0% { transform: translateX(-100%); width: 30%; }
+    50% { width: 60%; }
+    100% { transform: translateX(400%); width: 30%; }
 }
 
 * {

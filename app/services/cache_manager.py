@@ -136,12 +136,15 @@ class CacheManager:
             return None
 
     # ==========================================
-    # Cover image caching
+    # Cover image caching with optimization
     # ==========================================
+
+    COVER_MAX_WIDTH = 400    # Max width for cached covers
+    COVER_WEBP_QUALITY = 80  # WebP quality (0-100)
 
     def cache_cover_image(self, image_url: str, image_data: bytes) -> str:
         """
-        Cache cover image locally
+        Cache cover image with optional WebP conversion and resizing.
 
         Args:
             image_url: Original image URL
@@ -150,31 +153,69 @@ class CacheManager:
         Returns:
             Local file path to cached image
         """
-        # Generate filename from URL
         url_hash = self._get_cache_key(image_url)
-        extension = self._get_image_extension(image_url)
+        optimized_data, extension = self._optimize_image(image_data)
         image_file = self.images_dir / f"{url_hash}{extension}"
 
-        # Save image
         with open(image_file, 'wb') as f:
-            f.write(image_data)
+            f.write(optimized_data)
 
         return str(image_file)
 
+    def _optimize_image(self, image_data: bytes) -> tuple:
+        """Optimize image: convert to WebP and resize if too large.
+        Returns (optimized_bytes, extension)."""
+        try:
+            from PIL import Image
+            import io
+
+            img = Image.open(io.BytesIO(image_data))
+
+            # Convert RGBA/P to RGB for WebP/JPEG compatibility
+            if img.mode in ('RGBA', 'P'):
+                img = img.convert('RGB')
+
+            # Resize if wider than max width (maintain aspect ratio)
+            if img.width > self.COVER_MAX_WIDTH:
+                ratio = self.COVER_MAX_WIDTH / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((self.COVER_MAX_WIDTH, new_height), Image.LANCZOS)
+
+            # Try WebP first (usually smallest)
+            output = io.BytesIO()
+            img.save(output, format='WEBP', quality=self.COVER_WEBP_QUALITY, method=4)
+            webp_data = output.getvalue()
+
+            if len(webp_data) < len(image_data):
+                return webp_data, '.webp'
+
+            # Fallback: optimized JPEG
+            output = io.BytesIO()
+            img.save(output, format='JPEG', quality=85, optimize=True)
+            return output.getvalue(), '.jpg'
+
+        except ImportError:
+            logger.debug("Pillow not installed, skipping image optimization")
+            return image_data, self._get_image_extension_from_bytes(image_data)
+        except Exception as e:
+            logger.debug(f"Image optimization failed: {e}")
+            return image_data, self._get_image_extension_from_bytes(image_data)
+
+    def _get_image_extension_from_bytes(self, data: bytes) -> str:
+        """Detect image format from magic bytes."""
+        if data[:4] == b'\x89PNG':
+            return '.png'
+        if data[:2] == b'\xff\xd8':
+            return '.jpg'
+        if len(data) > 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            return '.webp'
+        return '.jpg'
+
     def get_cached_cover_image(self, image_url: str) -> Optional[str]:
-        """
-        Get cached cover image path
-
-        Args:
-            image_url: Original image URL
-
-        Returns:
-            Local file path or None if not cached/expired
-        """
+        """Get cached cover image path (prefers WebP)."""
         url_hash = self._get_cache_key(image_url)
 
-        # Try different extensions
-        for ext in ['.jpg', '.jpeg', '.png', '.webp']:
+        for ext in ['.webp', '.jpg', '.jpeg', '.png']:
             image_file = self.images_dir / f"{url_hash}{ext}"
             if not self._is_expired(image_file, self.default_ttl['cover_image']):
                 return str(image_file)
@@ -182,21 +223,11 @@ class CacheManager:
         return None
 
     def download_and_cache_image(self, image_url: str) -> Optional[str]:
-        """
-        Download and cache image from URL
-
-        Args:
-            image_url: Image URL to download
-
-        Returns:
-            Local file path or None on error
-        """
-        # Check cache first
+        """Download, optimize, and cache image from URL."""
         cached_path = self.get_cached_cover_image(image_url)
         if cached_path:
             return cached_path
 
-        # Download image
         try:
             response = self._get_session().get(image_url, timeout=10)
             if response.status_code == 200:
@@ -218,7 +249,7 @@ class CacheManager:
         elif path.endswith('.webp'):
             return '.webp'
         else:
-            return '.jpg'  # Default
+            return '.jpg'
 
     # ==========================================
     # HTTP response caching

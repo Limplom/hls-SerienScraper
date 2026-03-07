@@ -6,6 +6,11 @@
     <title>Settings - HLS Video Downloader</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}">
+    <script>
+        // Apply saved theme immediately to prevent flash
+        const t = localStorage.getItem('theme');
+        if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    </script>
 </head>
 <body>
     <div class="container">

@@ -607,18 +607,19 @@ class DownloadQueueManager:
             return removed_count
 
     def save_queue(self):
-        """Persist queue to file"""
+        """Persist queue to file (atomic write with temp file)"""
         try:
             data = [item.to_dict() for item in self.queue]
-            self.persist_path.write_text(
-                json.dumps(data, indent=2, ensure_ascii=False),
-                encoding='utf-8'
-            )
+            json_str = json.dumps(data, indent=2, ensure_ascii=False)
+            # Atomic write: write to temp file then rename
+            tmp_path = self.persist_path.with_suffix('.json.tmp')
+            tmp_path.write_text(json_str, encoding='utf-8')
+            tmp_path.replace(self.persist_path)
         except Exception as e:
             logger.warning(f"Error saving queue: {e}")
 
     def load_queue(self):
-        """Load queue from file"""
+        """Load queue from file, recovering interrupted downloads on restart"""
         if not self.persist_path.exists():
             logger.info("No existing queue file found, starting with empty queue")
             return
@@ -626,7 +627,6 @@ class DownloadQueueManager:
         try:
             file_content = self.persist_path.read_text(encoding='utf-8')
 
-            # Check if file is empty
             if not file_content.strip():
                 logger.warning("Queue file is empty, starting with empty queue")
                 self.queue = []
@@ -635,9 +635,20 @@ class DownloadQueueManager:
             data = json.loads(file_content)
             self.queue = [QueueItem.from_dict(item_data) for item_data in data]
             logger.info(f"Loaded {len(self.queue)} items from queue")
+
+            # Auto-resume: reset PROCESSING items to QUEUED (they were interrupted)
+            resumed = 0
+            for item in self.queue:
+                if item.status == DownloadStatus.PROCESSING:
+                    item.status = DownloadStatus.QUEUED
+                    item.started_at = None
+                    resumed += 1
+            if resumed > 0:
+                self.save_queue()
+                logger.info(f"Auto-resumed {resumed} interrupted download(s)")
+
         except json.JSONDecodeError as e:
             logger.error(f"Queue file is corrupted (JSON decode error): {e}")
-            # Backup corrupted file
             backup_path = self.persist_path.with_suffix('.json.backup')
             try:
                 import shutil

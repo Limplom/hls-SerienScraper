@@ -6,11 +6,18 @@
     <title>HLS Video Downloader</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        const t = localStorage.getItem('theme');
+        if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    </script>
 </head>
 <body>
+    <div class="global-loading-bar" id="globalLoadingBar"><div class="bar"></div></div>
     <div class="container">
         <header>
-            <h1>🎬 HLS Video Downloader</h1>
+            <h1>🎬 HLS Video Downloader
+                <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Dark/Light Mode" id="themeToggleBtn">🌙</button>
+            </h1>
             <p class="subtitle">Simple • Fast • Reliable</p>
         </header>
 

@@ -495,14 +495,16 @@ class RobustQueueProcessor:
         logger.info("Queue processor loop started")
         last_health_check = time.time()
         last_cache_cleanup = time.time()
+        last_queue_autosave = time.time()
 
         while not self._shutdown_event.is_set():
             try:
                 # Clear wakeup event at start of each iteration
                 self._wakeup_event.clear()
 
-                # Health check for stuck downloads and memory cleanup
                 current_time = time.time()
+
+                # Health check for stuck downloads and memory cleanup
                 if current_time - last_health_check > self._health_check_interval:
                     self._check_stuck_downloads()
                     active_downloads.cleanup_old_entries(max_age_hours=1)
@@ -516,6 +518,14 @@ class RobustQueueProcessor:
                     except Exception as e:
                         logger.warning(f"Cache cleanup failed: {e}")
                     last_cache_cleanup = current_time
+
+                # Periodic queue auto-save (every 5 minutes)
+                if current_time - last_queue_autosave > 300:
+                    try:
+                        queue_manager.save_queue()
+                    except Exception as e:
+                        logger.warning(f"Queue auto-save failed: {e}")
+                    last_queue_autosave = current_time
 
                 # Start as many series as possible
                 # Note: max_parallel now controls EPISODE parallelism via global_episode_semaphore
@@ -618,19 +628,30 @@ class RobustQueueProcessor:
             self._cleanup_session(session_id, success=False, error=str(e))
 
     def _download_worker(self, item):
-        """Worker function that processes a single download."""
+        """Worker function that processes a single download with graceful degradation."""
         session_id = item.session_id
 
         try:
             logger.info(f"Worker started: {item.series_name}")
             logger.debug(f"Language option: {item.options.get('language', 'NOT SET')}")
 
-            # Run the actual download
             run_download_thread(session_id, item.url, item.options)
-
             return {'success': True, 'session_id': session_id}
 
         except Exception as e:
+            error_str = str(e).lower()
+            # Graceful degradation: if browser pool fails, retry with single-browser mode
+            if 'browser' in error_str or 'playwright' in error_str or 'context' in error_str:
+                logger.warning(f"Browser pool error for {item.series_name}, retrying with single-browser fallback")
+                try:
+                    # Force parallel=1 to avoid pool usage
+                    fallback_options = {**item.options, 'parallel': 1}
+                    run_download_thread(session_id, item.url, fallback_options)
+                    return {'success': True, 'session_id': session_id}
+                except Exception as e2:
+                    logger.error(f"Fallback also failed: {item.series_name} - {e2}")
+                    return {'success': False, 'session_id': session_id, 'error': str(e2)}
+
             logger.error(f"Worker error: {item.series_name} - {e}")
             traceback.print_exc()
             return {'success': False, 'session_id': session_id, 'error': str(e)}

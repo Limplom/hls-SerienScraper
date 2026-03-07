@@ -3003,6 +3003,66 @@ async function handleEpisodeDrop(e) {
     }
 }
 
+// ==========================================
+// Theme Toggle (Dark/Light Mode)
+// ==========================================
+
+function toggleTheme() {
+    const html = document.documentElement;
+    const current = html.getAttribute('data-theme');
+    const newTheme = current === 'light' ? 'dark' : 'light';
+    html.setAttribute('data-theme', newTheme);
+    localStorage.setItem('theme', newTheme);
+    updateThemeIcon(newTheme);
+}
+
+function updateThemeIcon(theme) {
+    const btn = document.getElementById('themeToggleBtn');
+    if (btn) btn.textContent = theme === 'light' ? '☀️' : '🌙';
+}
+
+// Apply saved theme on load
+(function() {
+    const saved = localStorage.getItem('theme') || 'dark';
+    if (saved === 'light') {
+        document.documentElement.setAttribute('data-theme', 'light');
+    }
+    // Update icon after DOM ready
+    document.addEventListener('DOMContentLoaded', () => updateThemeIcon(saved));
+})();
+
+// ==========================================
+// Global Loading Indicator for API calls
+// ==========================================
+
+let activeRequests = 0;
+
+function showGlobalLoading() {
+    activeRequests++;
+    const bar = document.getElementById('globalLoadingBar');
+    if (bar) bar.classList.add('active');
+}
+
+function hideGlobalLoading() {
+    activeRequests = Math.max(0, activeRequests - 1);
+    if (activeRequests === 0) {
+        const bar = document.getElementById('globalLoadingBar');
+        if (bar) bar.classList.remove('active');
+    }
+}
+
+// Wrap fetch to automatically show/hide loading bar
+const _originalFetch = window.fetch;
+window.fetch = function(...args) {
+    // Only track API calls
+    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
+    if (url.startsWith('/api/')) {
+        showGlobalLoading();
+        return _originalFetch.apply(this, args).finally(hideGlobalLoading);
+    }
+    return _originalFetch.apply(this, args);
+};
+
 // Initialize drag and drop when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     initDragAndDrop();
