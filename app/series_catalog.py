@@ -215,6 +215,9 @@ async def scrape_catalog(source='series', max_workers=3) -> Dict:
         finally:
             await browser.close()
 
+    if not genres_data or total_count == 0:
+        raise ValueError(f"Catalog scrape returned empty data for {source} - page may not have loaded correctly")
+
     catalog = {
         'source': source,
         'source_name': src_config['name'],

@@ -274,7 +274,21 @@ function initializeWebSocket() {
 
     socket.on('disconnect', function() {
         console.log('Disconnected from server');
-        addLog('⚠️ Disconnected from server', 'warning');
+        addLog('Disconnected from server', 'warning');
+        // Stop polling to avoid fetch errors while disconnected
+        if (queuePollInterval) {
+            clearInterval(queuePollInterval);
+            queuePollInterval = null;
+        }
+    });
+
+    socket.on('reconnect', function() {
+        console.log('Reconnected to server');
+        addLog('Reconnected to server', 'success');
+        // Resume polling if downloads section is visible
+        if (document.getElementById('downloadsSection').style.display !== 'none') {
+            startQueuePolling();
+        }
     });
 
     socket.on('log', function(data) {
@@ -624,6 +638,10 @@ function updateStatus(data) {
     // If completed or error, reset UI
     if (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled') {
         setTimeout(resetUI, 3000);
+        // Rescan library after completion to update downloaded badges
+        if (data.status === 'completed') {
+            loadLibrary(true);
+        }
     }
 }
 
@@ -2056,17 +2074,23 @@ function startQueuePolling() {
 // Update queue status from API
 async function updateQueueStatus() {
     try {
-        console.log('🔍 Fetching queue status from /api/queue...');
         const response = await fetch('/api/queue');
         const data = await response.json();
-        console.log('📥 Queue status received:', data);
-        console.log(`   Total: ${data.total}, Queued: ${data.queued}, Processing: ${data.processing}, Completed: ${data.completed}`);
         renderQueue(data);
 
         // Check for duplicate series entries
         checkForDuplicates();
+
+        // Auto-stop polling when no active downloads remain
+        const hasActive = data.items.some(item =>
+            item.status === 'processing' || item.status === 'queued'
+        );
+        if (!hasActive && queuePollInterval) {
+            clearInterval(queuePollInterval);
+            queuePollInterval = null;
+        }
     } catch (error) {
-        console.error('❌ Error fetching queue:', error);
+        console.error('Error fetching queue:', error);
     }
 }
 
@@ -2091,7 +2115,16 @@ function renderQueue(queueData) {
     if (!queueData.items || queueData.items.length === 0) {
         container.innerHTML = '<p class="downloads-empty">No active downloads</p>';
         currentQueueState.clear();
+        downloadCardCache.clear();
         return;
+    }
+
+    // Evict stale entries from card cache
+    const activeSessionIds = new Set(queueData.items.map(item => item.session_id.substring(0, 8)));
+    for (const key of downloadCardCache.keys()) {
+        if (!activeSessionIds.has(key)) {
+            downloadCardCache.delete(key);
+        }
     }
 
     // Check if we need a full re-render or can do incremental updates
@@ -3526,6 +3559,9 @@ let currentSource = 'series'; // Track current source
 let displayedCount = 0;
 const SERIES_PER_PAGE = Infinity; // Load all series for horizontal slider
 
+// Library state: tracks which series are already downloaded
+let libraryData = {}; // { normalized_name: { name, seasons, total_episodes } }
+
 // Batch mode state
 let batchModeActive = false;
 let selectedSeries = new Set(); // Set of slugs
@@ -3899,6 +3935,12 @@ function createSeriesCard(series) {
     card.dataset.genre = series.genre;
     card.dataset.source = series.source || currentSource; // Store source
 
+    // Check library for downloaded status
+    const libraryMatch = getLibraryMatch(series.name) || getLibraryMatch(series.slug);
+    if (libraryMatch) {
+        card.classList.add('is-downloaded');
+    }
+
     // Get first letter for placeholder
     const initial = series.name.charAt(0).toUpperCase();
 
@@ -3914,9 +3956,18 @@ function createSeriesCard(series) {
         </div>
     ` : '';
 
+    // Downloaded badge
+    let badgeHtml = '';
+    if (libraryMatch) {
+        const seasonCount = Object.keys(libraryMatch.seasons).length;
+        const epCount = libraryMatch.total_episodes;
+        badgeHtml = `<div class="series-card-downloaded-badge">${seasonCount}S / ${epCount}E</div>`;
+    }
+
     card.innerHTML = `
         ${checkboxHtml}
         <div class="series-card-cover" data-lazy-cover="${series.slug}" data-source="${series.source || currentSource}">
+            ${badgeHtml}
             <div class="series-card-placeholder">
                 <span class="series-initial">${initial}</span>
             </div>
@@ -4072,8 +4123,8 @@ document.addEventListener('DOMContentLoaded', () => {
         searchInput.addEventListener('input', debounce(applyFilters, 300));
     }
 
-    // Auto-load catalog from cache if available
-    loadCatalogOnStartup();
+    // Load library (downloaded series detection) then catalog
+    loadLibrary(true).then(() => loadCatalogOnStartup());
 });
 
 async function loadCatalogOnStartup() {
@@ -4097,4 +4148,55 @@ async function loadCatalogOnStartup() {
     } catch (error) {
         console.log('Could not check catalog status:', error);
     }
+}
+
+// ==========================================
+// Library: Downloaded Series Detection
+// ==========================================
+
+async function loadLibrary(scan = false) {
+    try {
+        const url = scan ? '/api/library/scan' : '/api/library';
+        const options = scan ? { method: 'POST' } : {};
+        const response = await fetch(url, options);
+        const data = await response.json();
+
+        if (data.library) {
+            libraryData = data.library;
+            // Re-render cards if catalog is loaded to show badges
+            if (catalogData) {
+                renderSeriesGrid();
+            }
+        }
+    } catch (error) {
+        console.log('Could not load library:', error);
+    }
+}
+
+function getLibraryMatch(seriesName) {
+    if (!seriesName || Object.keys(libraryData).length === 0) return null;
+
+    const normalized = seriesName.trim().toLowerCase();
+
+    // Exact match
+    if (libraryData[normalized]) return libraryData[normalized];
+
+    // Check if series name is contained in library key or vice versa
+    for (const [key, data] of Object.entries(libraryData)) {
+        if (key.includes(normalized) || normalized.includes(key)) {
+            return data;
+        }
+    }
+
+    // Slug-based match: "my-series-name" -> "my series name"
+    const slugNormalized = normalized.replace(/-/g, ' ');
+    if (libraryData[slugNormalized]) return libraryData[slugNormalized];
+
+    for (const [key, data] of Object.entries(libraryData)) {
+        if (key.includes(slugNormalized) || slugNormalized.includes(key)) {
+            return data;
+        }
+    }
+
+    return null;
 }

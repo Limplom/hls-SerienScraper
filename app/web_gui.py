@@ -104,9 +104,10 @@ socketio = SocketIO(app, cors_allowed_origins=ALLOWED_ORIGINS, async_mode='threa
                     ping_timeout=30, ping_interval=15)
 
 # Register blueprints
-from app.routes import settings_bp, catalog_bp
+from app.routes import settings_bp, catalog_bp, library_bp
 app.register_blueprint(settings_bp)
 app.register_blueprint(catalog_bp)
+app.register_blueprint(library_bp)
 
 # Thread-safe wrapper for active_downloads dict
 class ThreadSafeDict:

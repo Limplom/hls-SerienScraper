@@ -8,3 +8,4 @@ download_queue.json
 /Downloads
 /bin
 config/.secret_key
+config/library.json

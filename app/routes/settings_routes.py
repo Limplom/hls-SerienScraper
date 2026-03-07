@@ -205,9 +205,17 @@ def restart_server():
         import subprocess
         import signal
 
-        # Save queue state before restart
-        from app.web_gui import queue_manager
+        # Graceful shutdown: save queue, stop processors, close browser pool
+        from app.web_gui import queue_manager, queue_processor, auto_scraper
         queue_manager.save_queue()
+        try:
+            auto_scraper.stop()
+        except Exception:
+            pass
+        try:
+            queue_processor.stop(timeout=5.0)
+        except Exception:
+            pass
 
         # Spawn a child process that waits for us to die, then starts the server again
         # The child is detached so it survives our exit

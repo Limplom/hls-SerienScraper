@@ -384,7 +384,10 @@ class PooledPageContext:
         self.context = await self.pool.acquire()
 
         try:
-            self.page = await self.context.new_page()
+            self.page = await asyncio.wait_for(
+                self.context.new_page(),
+                timeout=30.0
+            )
             self.page.set_default_timeout(self.timeout)
             self.page.set_default_navigation_timeout(self.timeout)
             return self.page

@@ -198,7 +198,7 @@ class CacheManager:
             logger.debug("Pillow not installed, skipping image optimization")
             return image_data, self._get_image_extension_from_bytes(image_data)
         except Exception as e:
-            logger.debug(f"Image optimization failed: {e}")
+            logger.warning(f"Image optimization failed, using original: {e}")
             return image_data, self._get_image_extension_from_bytes(image_data)
 
     def _get_image_extension_from_bytes(self, data: bytes) -> str:
