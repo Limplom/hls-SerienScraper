@@ -274,7 +274,7 @@ def save_catalog_cache(catalog_data: Dict, source='series') -> bool:
         cache_file.parent.mkdir(exist_ok=True)
 
         with open(cache_file, 'w', encoding='utf-8') as f:
-            json.dump(catalog_data, f, ensure_ascii=False, indent=2)
+            json.dump(catalog_data, f, ensure_ascii=False, separators=(',', ':'))
 
         logger.info(f"{source.capitalize()} catalog saved to cache: {cache_file}")
         return True
@@ -285,19 +285,21 @@ def save_catalog_cache(catalog_data: Dict, source='series') -> bool:
 
 
 def is_catalog_stale(source='series', max_age_hours=CATALOG_MAX_AGE_HOURS) -> bool:
-    """Check if catalog needs refresh based on age"""
-    catalog = load_catalog_cache(source)
-    if not catalog:
+    """Check if catalog needs refresh based on file mtime (avoids loading entire file)"""
+    if source not in SOURCES:
+        return True
+
+    cache_file = SOURCES[source]['cache_file']
+    if not cache_file.exists():
         return True
 
     try:
-        last_updated = datetime.fromisoformat(catalog['last_updated'])
-        age = datetime.now() - last_updated
-
-        is_stale = age > timedelta(hours=max_age_hours)
+        file_age_seconds = datetime.now().timestamp() - cache_file.stat().st_mtime
+        max_age_seconds = max_age_hours * 3600
+        is_stale = file_age_seconds > max_age_seconds
 
         if is_stale:
-            logger.info(f"{source.capitalize()} catalog is {age.total_seconds() / 3600:.1f} hours old (max: {max_age_hours}h)")
+            logger.info(f"{source.capitalize()} catalog is {file_age_seconds / 3600:.1f} hours old (max: {max_age_hours}h)")
 
         return is_stale
 

@@ -136,7 +136,22 @@ class DownloadQueueManager:
         self.queue: List[QueueItem] = []
         self.lock = threading.Lock()
         self.persist_path = Path(persist_path)
+        # Session ID index for O(1) lookups
+        self._session_index: Dict[str, QueueItem] = {}
+        # Debounced save: accumulate changes, write at most every 2 seconds
+        self._save_timer: Optional[threading.Timer] = None
+        self._save_pending = False
+        self._save_lock = threading.Lock()
+        self._SAVE_DEBOUNCE_SECONDS = 2.0
         self.load_queue()
+
+    def _rebuild_index(self):
+        """Rebuild the session_id -> QueueItem index from current queue"""
+        self._session_index = {item.session_id: item for item in self.queue}
+
+    def _get_item_by_session(self, session_id: str) -> Optional[QueueItem]:
+        """O(1) lookup by session_id using index"""
+        return self._session_index.get(session_id)
 
     def add_to_queue(self, session_id: str, url: str, options: Dict[str, Any],
                      episodes_per_season: Optional[Dict[int, List[int]]] = None,
@@ -159,6 +174,7 @@ class DownloadQueueManager:
             item = QueueItem(session_id, url, options, episodes_per_season,
                            priority, scheduled_start, max_download_rate)
             self.queue.append(item)
+            self._session_index[session_id] = item
             self.save_queue()
 
             status_msg = f"✅ Added to queue: {item.series_name} (Session: {session_id})"
@@ -217,11 +233,7 @@ class DownloadQueueManager:
             }
         """
         with self.lock:
-            item = None
-            for q_item in self.queue:
-                if q_item.session_id == session_id:
-                    item = q_item
-                    break
+            item = self._get_item_by_session(session_id)
 
             if not item:
                 return {'success': False, 'error': 'Queue item not found'}
@@ -383,6 +395,7 @@ class DownloadQueueManager:
             primary_item.options['episodes_per_season'] = primary_eps
             primary_item.total_episodes = sum(len(eps) for eps in primary_eps.values())
 
+            self._rebuild_index()
             self.save_queue()
 
             logger.info(f"Consolidated {len(items_to_remove) + 1} entries for {primary_item.series_name}")
@@ -476,54 +489,49 @@ class DownloadQueueManager:
             return queued_items[0]
 
     def get_item(self, session_id: str) -> Optional[QueueItem]:
-        """Get specific queue item by session ID"""
+        """Get specific queue item by session ID (O(1) indexed lookup)"""
         with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    return item
-            return None
+            return self._get_item_by_session(session_id)
 
     def update_status(self, session_id: str, status: DownloadStatus, **kwargs) -> bool:
         """Update item status and additional attributes"""
         with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    item.status = status
-                    for key, value in kwargs.items():
-                        if hasattr(item, key):
-                            setattr(item, key, value)
-                    self.save_queue()
-                    return True
+            item = self._get_item_by_session(session_id)
+            if item:
+                item.status = status
+                for key, value in kwargs.items():
+                    if hasattr(item, key):
+                        setattr(item, key, value)
+                self.save_queue()
+                return True
         return False
 
     def update_progress(self, session_id: str, total: int = None,
                        completed: int = None, failed_episodes: List = None) -> bool:
-        """Update download progress"""
+        """Update download progress (debounced save)"""
         with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    if total is not None:
-                        item.total_episodes = total
-                    if completed is not None:
-                        item.completed_episodes = completed
-                    if failed_episodes is not None:
-                        item.failed_episodes = failed_episodes
-                    self.save_queue()
-                    return True
+            item = self._get_item_by_session(session_id)
+            if item:
+                if total is not None:
+                    item.total_episodes = total
+                if completed is not None:
+                    item.completed_episodes = completed
+                if failed_episodes is not None:
+                    item.failed_episodes = failed_episodes
+                self._schedule_save()
+                return True
         return False
 
     def get_failed_episodes(self, session_id: str) -> List[Dict[str, Any]]:
         """Get failed episodes for retry"""
         with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    return item.failed_episodes
-        return []
+            item = self._get_item_by_session(session_id)
+            return item.failed_episodes if item else []
 
     def retry_failed(self, session_id: str) -> Optional[QueueItem]:
         """Create new queue item for failed episodes only"""
         with self.lock:
-            original = next((i for i in self.queue if i.session_id == session_id), None)
+            original = self._get_item_by_session(session_id)
             if not original or not original.failed_episodes:
                 return None
 
@@ -571,6 +579,7 @@ class DownloadQueueManager:
             retry_item.series_name = f"{original.series_name} (Retry)"
 
             self.queue.append(retry_item)
+            self._session_index[retry_session_id] = retry_item
             self.save_queue()
 
             logger.info(f"Retry queued: {len(original.failed_episodes)} failed episodes from {original.series_name}")
@@ -582,6 +591,7 @@ class DownloadQueueManager:
             original_length = len(self.queue)
             self.queue = [item for item in self.queue if item.session_id != session_id]
             if len(self.queue) < original_length:
+                self._session_index.pop(session_id, None)
                 self.save_queue()
                 return True
         return False
@@ -601,17 +611,52 @@ class DownloadQueueManager:
             self.queue = active + kept_inactive
 
             if removed_count > 0:
+                self._rebuild_index()
                 self.save_queue()
                 logger.info(f"Cleared {removed_count} old downloads")
 
             return removed_count
 
+    def _schedule_save(self):
+        """Schedule a debounced save (coalesces frequent writes)"""
+        with self._save_lock:
+            self._save_pending = True
+            if self._save_timer is None or not self._save_timer.is_alive():
+                self._save_timer = threading.Timer(self._SAVE_DEBOUNCE_SECONDS, self._do_debounced_save)
+                self._save_timer.daemon = True
+                self._save_timer.start()
+
+    def _do_debounced_save(self):
+        """Execute the debounced save"""
+        with self._save_lock:
+            self._save_pending = False
+        with self.lock:
+            self._write_queue_to_disk()
+
     def save_queue(self):
-        """Persist queue to file (atomic write with temp file)"""
+        """Persist queue to file immediately (atomic write with temp file)"""
+        # Cancel any pending debounced save
+        with self._save_lock:
+            self._save_pending = False
+            if self._save_timer and self._save_timer.is_alive():
+                self._save_timer.cancel()
+        self._write_queue_to_disk()
+
+    def flush_save(self):
+        """Force any pending debounced save to disk (call on shutdown)"""
+        with self._save_lock:
+            if self._save_timer and self._save_timer.is_alive():
+                self._save_timer.cancel()
+            if self._save_pending:
+                self._save_pending = False
+                with self.lock:
+                    self._write_queue_to_disk()
+
+    def _write_queue_to_disk(self):
+        """Internal: write queue data to disk"""
         try:
             data = [item.to_dict() for item in self.queue]
-            json_str = json.dumps(data, indent=2, ensure_ascii=False)
-            # Atomic write: write to temp file then rename
+            json_str = json.dumps(data, separators=(',', ':'), ensure_ascii=False)
             tmp_path = self.persist_path.with_suffix('.json.tmp')
             tmp_path.write_text(json_str, encoding='utf-8')
             tmp_path.replace(self.persist_path)
@@ -634,6 +679,7 @@ class DownloadQueueManager:
 
             data = json.loads(file_content)
             self.queue = [QueueItem.from_dict(item_data) for item_data in data]
+            self._rebuild_index()
             logger.info(f"Loaded {len(self.queue)} items from queue")
 
             # Auto-resume: reset PROCESSING items to QUEUED (they were interrupted)
@@ -718,17 +764,17 @@ class DownloadQueueManager:
             True if priority changed, False otherwise
         """
         with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    if item.status == DownloadStatus.QUEUED:
-                        old_priority = item.priority
-                        item.priority = priority
-                        self.save_queue()
-                        logger.info(f"Priority changed: {item.series_name} ({old_priority.name} -> {priority.name})")
-                        return True
-                    else:
-                        logger.warning(f"Cannot change priority for {item.series_name} - status: {item.status.value}")
-                        return False
+            item = self._get_item_by_session(session_id)
+            if item:
+                if item.status == DownloadStatus.QUEUED:
+                    old_priority = item.priority
+                    item.priority = priority
+                    self.save_queue()
+                    logger.info(f"Priority changed: {item.series_name} ({old_priority.name} -> {priority.name})")
+                    return True
+                else:
+                    logger.warning(f"Cannot change priority for {item.series_name} - status: {item.status.value}")
+                    return False
         return False
 
     def reorder(self, session_ids: List[str]) -> bool:
@@ -773,6 +819,7 @@ class DownloadQueueManager:
 
             # Reconstruct queue: others first (processing, completed, etc.), then reordered queued
             self.queue = others + new_queued
+            self._rebuild_index()
             self.save_queue()
 
             logger.info(f"Queue reordered: {len(new_queued)} items")
@@ -809,17 +856,17 @@ class DownloadQueueManager:
             Tuple of (should_retry: bool, retry_delay: int, attempt_number: int)
         """
         with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    if not item.auto_retry_enabled:
-                        return (False, 0, 0)
+            item = self._get_item_by_session(session_id)
+            if item:
+                if not item.auto_retry_enabled:
+                    return (False, 0, 0)
 
-                    current_retries = item.episode_retry_counts.get(episode_key, 0)
-                    if current_retries >= item.max_retries:
-                        return (False, 0, current_retries)
+                current_retries = item.episode_retry_counts.get(episode_key, 0)
+                if current_retries >= item.max_retries:
+                    return (False, 0, current_retries)
 
-                    delay = self.calculate_retry_delay(current_retries)
-                    return (True, delay, current_retries + 1)
+                delay = self.calculate_retry_delay(current_retries)
+                return (True, delay, current_retries + 1)
 
         return (False, 0, 0)
 
@@ -835,12 +882,12 @@ class DownloadQueueManager:
             New retry count
         """
         with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    current = item.episode_retry_counts.get(episode_key, 0)
-                    item.episode_retry_counts[episode_key] = current + 1
-                    self.save_queue()
-                    return current + 1
+            item = self._get_item_by_session(session_id)
+            if item:
+                current = item.episode_retry_counts.get(episode_key, 0)
+                item.episode_retry_counts[episode_key] = current + 1
+                self._schedule_save()
+                return current + 1
         return 0
 
     def reset_retry_count(self, session_id: str, episode_key: str) -> None:
@@ -852,12 +899,10 @@ class DownloadQueueManager:
             episode_key: Episode identifier
         """
         with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    if episode_key in item.episode_retry_counts:
-                        del item.episode_retry_counts[episode_key]
-                        self.save_queue()
-                    return
+            item = self._get_item_by_session(session_id)
+            if item and episode_key in item.episode_retry_counts:
+                del item.episode_retry_counts[episode_key]
+                self._schedule_save()
 
     # ==========================================
     # Individual Episode Status Tracking
@@ -872,18 +917,18 @@ class DownloadQueueManager:
             episodes: List of episode keys (e.g., ["S01E01", "S01E02", ...])
         """
         with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    item.episode_status = {}
-                    for ep_key in episodes:
-                        item.episode_status[ep_key] = {
-                            'status': 'queued',
-                            'progress': 0,
-                            'started_at': None,
-                            'completed_at': None
-                        }
-                    self.save_queue()
-                    return
+            item = self._get_item_by_session(session_id)
+            if item:
+                item.episode_status = {
+                    ep_key: {
+                        'status': 'queued',
+                        'progress': 0,
+                        'started_at': None,
+                        'completed_at': None
+                    }
+                    for ep_key in episodes
+                }
+                self.save_queue()
 
     def update_episode_status(self, session_id: str, episode_key: str,
                               status: str = None, progress: float = None) -> bool:
@@ -900,30 +945,30 @@ class DownloadQueueManager:
             True if updated, False otherwise
         """
         with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    if episode_key not in item.episode_status:
-                        item.episode_status[episode_key] = {
-                            'status': 'queued',
-                            'progress': 0,
-                            'started_at': None,
-                            'completed_at': None
-                        }
+            item = self._get_item_by_session(session_id)
+            if item:
+                if episode_key not in item.episode_status:
+                    item.episode_status[episode_key] = {
+                        'status': 'queued',
+                        'progress': 0,
+                        'started_at': None,
+                        'completed_at': None
+                    }
 
-                    if status:
-                        item.episode_status[episode_key]['status'] = status
-                        if status == 'downloading' and not item.episode_status[episode_key]['started_at']:
-                            item.episode_status[episode_key]['started_at'] = datetime.now().isoformat()
-                        elif status in ['completed', 'failed']:
-                            item.episode_status[episode_key]['completed_at'] = datetime.now().isoformat()
+                if status:
+                    item.episode_status[episode_key]['status'] = status
+                    if status == 'downloading' and not item.episode_status[episode_key]['started_at']:
+                        item.episode_status[episode_key]['started_at'] = datetime.now().isoformat()
+                    elif status in ['completed', 'failed']:
+                        item.episode_status[episode_key]['completed_at'] = datetime.now().isoformat()
 
-                    if progress is not None:
-                        item.episode_status[episode_key]['progress'] = progress
+                if progress is not None:
+                    item.episode_status[episode_key]['progress'] = progress
 
-                    # Don't save on every progress update (too frequent)
-                    if status:
-                        self.save_queue()
-                    return True
+                # Status changes save with debounce, progress-only updates don't save
+                if status:
+                    self._schedule_save()
+                return True
         return False
 
     def get_episode_status(self, session_id: str) -> Dict[str, Any]:
@@ -937,7 +982,5 @@ class DownloadQueueManager:
             Dict of episode_key -> status info
         """
         with self.lock:
-            for item in self.queue:
-                if item.session_id == session_id:
-                    return dict(item.episode_status)
-        return {}
+            item = self._get_item_by_session(session_id)
+            return dict(item.episode_status) if item else {}

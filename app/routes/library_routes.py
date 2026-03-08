@@ -5,6 +5,7 @@ Scans download directory and tracks which series are already downloaded.
 from flask import Blueprint, jsonify
 import json
 import os
+import re
 import logging
 from pathlib import Path
 
@@ -62,8 +63,18 @@ def scan_download_directory():
                     f.name for f in sorted(item.iterdir())
                     if f.is_file() and f.suffix.lower() in video_extensions
                 ]
+
+                # Extract episode numbers from filenames (e.g. "S01E05" -> 5)
+                episode_numbers = []
+                for fname in files:
+                    m = re.search(r'S\d+E(\d+)', fname)
+                    if m:
+                        episode_numbers.append(int(m.group(1)))
+                episode_numbers.sort()
+
                 seasons[season_num] = {
                     "episode_count": len(files),
+                    "episodes": episode_numbers,
                     "files": files
                 }
                 total_episodes += len(files)

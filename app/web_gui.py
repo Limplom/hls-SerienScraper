@@ -255,6 +255,13 @@ class GlobalEpisodeSemaphore:
                 self._active_count -= 1
         self._semaphore.release()
 
+    def reset(self):
+        """Reset semaphore to configured max. Use when leak is detected."""
+        with self._lock:
+            logger.warning(f"Semaphore reset: was active_count={self._active_count}, max={self._max}")
+            self._semaphore = threading.Semaphore(self._max)
+            self._active_count = 0
+
     def __enter__(self):
         self.acquire()
         return self
@@ -509,6 +516,7 @@ class RobustQueueProcessor:
                 # Health check for stuck downloads and memory cleanup
                 if current_time - last_health_check > self._health_check_interval:
                     self._check_stuck_downloads()
+                    self._check_semaphore_leak()
                     active_downloads.cleanup_old_entries(max_age_hours=1)
                     last_health_check = current_time
 
@@ -575,15 +583,9 @@ class RobustQueueProcessor:
 
     def _wait_for_event(self, timeout: float):
         """Wait for shutdown, wakeup, or timeout - whichever comes first."""
-        # Wait for either event with timeout
-        start = time.time()
-        while time.time() - start < timeout:
-            if self._shutdown_event.is_set():
-                return
-            if self._wakeup_event.is_set():
-                self._wakeup_event.clear()
-                return
-            time.sleep(0.1)
+        # Use Event.wait() instead of busy-polling (saves CPU)
+        self._wakeup_event.wait(timeout=timeout)
+        self._wakeup_event.clear()
 
     def wakeup(self):
         """Wake up the processor to check for new work immediately."""
@@ -592,6 +594,11 @@ class RobustQueueProcessor:
     def _start_download(self, item):
         """Start a download for the given queue item."""
         session_id = item.session_id
+
+        # Check if item was cancelled while waiting in queue
+        if item.status == DownloadStatus.CANCELLED:
+            logger.info(f"Skipping cancelled item: {session_id[:8]}...")
+            return
 
         with self._lock:
             if session_id in self._active_sessions:
@@ -715,6 +722,20 @@ class RobustQueueProcessor:
 
         # Wake up processor immediately to start next download
         self.wakeup()
+
+    def _check_semaphore_leak(self):
+        """Detect and recover from semaphore leaks.
+        If no active series are running but the semaphore reports active slots,
+        the semaphore is leaked and needs to be reset."""
+        with self._lock:
+            active_series = len(self._active_sessions)
+
+        if active_series == 0 and global_episode_semaphore.active_count > 0:
+            logger.warning(
+                f"Semaphore leak detected: {global_episode_semaphore.active_count} slots in use "
+                f"but 0 active series. Resetting semaphore."
+            )
+            global_episode_semaphore.reset()
 
     def _check_stuck_downloads(self):
         """Check for downloads that appear to be stuck."""
@@ -1251,6 +1272,9 @@ class BackgroundAutoScraper:
                 )
 
                 context = await browser.new_context()
+                # Block images/fonts for faster scraping
+                await context.route("**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot}",
+                                   lambda route: route.abort())
                 page = await context.new_page()
                 page.set_default_timeout(20000)
 
@@ -1581,6 +1605,8 @@ class WebLogger:
         self.session_id = session_id
         self.episode_key = episode_key  # e.g., "S01E05" for tracking parallel progress
         self.last_progress_id = None
+        self._last_progress_emit = 0.0  # Throttle progress emissions
+        self._progress_throttle_interval = 0.25  # 250ms between progress updates
 
     def log(self, message, level="info", update_last=False):
         """Send log message to web client"""
@@ -1614,23 +1640,33 @@ class WebLogger:
         })
 
     def log_download_progress(self, percent, speed=None, eta=None):
-        """Send download progress and track for parallel aggregation"""
-        # Track progress for this episode (for parallel download averaging)
+        """Send download progress and track for parallel aggregation (throttled)"""
+        now = time.monotonic()
+        percent_f = float(percent)
+
+        # Always track progress internally for aggregation (even if throttled)
         if self.episode_key:
             with parallel_progress_lock:
                 if self.session_id not in parallel_progress_tracker:
                     parallel_progress_tracker[self.session_id] = {}
-                parallel_progress_tracker[self.session_id][self.episode_key] = float(percent)
+                parallel_progress_tracker[self.session_id][self.episode_key] = percent_f
 
-            # Update episode status in queue manager (downloading with progress)
-            queue_manager.update_episode_status(self.session_id, self.episode_key, status='downloading', progress=float(percent))
+        # Throttle WebSocket emissions to reduce network/DOM overhead
+        # Always emit at 100% completion
+        if percent_f < 100.0 and (now - self._last_progress_emit) < self._progress_throttle_interval:
+            return
+        self._last_progress_emit = now
+
+        if self.episode_key:
+            # Update episode status in queue manager
+            queue_manager.update_episode_status(self.session_id, self.episode_key, status='downloading', progress=percent_f)
 
             # Emit individual episode status update for real-time UI
             socketio.emit('episode_status_update', {
                 'session_id': self.session_id,
                 'episode_key': self.episode_key,
                 'status': 'downloading',
-                'progress': float(percent),
+                'progress': percent_f,
                 'speed': speed,
                 'eta': eta
             })
@@ -1639,7 +1675,7 @@ class WebLogger:
         socketio.emit('download_progress', {
             'session_id': self.session_id,
             'episode_key': self.episode_key,
-            'percent': float(percent),
+            'percent': percent_f,
             'speed': speed,
             'eta': eta
         })
@@ -2045,22 +2081,33 @@ async def process_episode_with_semaphore(ep_num, base_url, season, args, episode
     active = global_episode_semaphore.active_count
     logger.info(f"{episode_key} waiting for global slot... (active: {active}/{global_episode_semaphore.max_concurrent})")
 
-    # Acquire global semaphore slot using non-blocking polling to avoid wasting executor threads
-    acquired = False
+    # Acquire global semaphore slot using run_in_executor to avoid busy-polling
+    # Blocks in a thread pool instead of polling every 0.5s
     loop = asyncio.get_event_loop()
-    deadline = loop.time() + 3600
-    while loop.time() < deadline:
-        if global_episode_semaphore.acquire(timeout=0):
-            acquired = True
-            break
-        # Check cancellation while waiting
-        if cancel_check and cancel_check():
-            if logger:
-                logger.log(f"{browser_id} ⏹️ {episode_key} cancelled while waiting for slot", "warning")
-            return None
-        await asyncio.sleep(0.5)
 
-    if not acquired:
+    async def _try_acquire_with_cancel():
+        while True:
+            # Try blocking acquire with short timeout in executor
+            acquired = await loop.run_in_executor(
+                None, lambda: global_episode_semaphore.acquire(timeout=2.0)
+            )
+            if acquired:
+                return True
+            # Check cancellation between attempts
+            if cancel_check and cancel_check():
+                return None
+
+    try:
+        result = await asyncio.wait_for(_try_acquire_with_cancel(), timeout=3600)
+    except asyncio.TimeoutError:
+        result = False
+
+    if result is None:
+        if logger:
+            logger.log(f"{browser_id} ⏹️ {episode_key} cancelled while waiting for slot", "warning")
+        return None
+
+    if result is False:
         if logger:
             logger.log(f"{browser_id} ⏹️ {episode_key} timeout waiting for slot", "error")
         return False
@@ -2081,7 +2128,19 @@ async def process_episode_with_semaphore(ep_num, base_url, season, args, episode
 
         try:
             extractor = HLSExtractor()
-            result = await process_single_episode(extractor, url, args, browser_id, logger)
+            # Timeout per episode to prevent semaphore starvation from hung downloads
+            episode_timeout = max(args.wait * 3, 300)  # At least 5 minutes
+            try:
+                result = await asyncio.wait_for(
+                    process_single_episode(extractor, url, args, browser_id, logger),
+                    timeout=episode_timeout
+                )
+            except asyncio.TimeoutError:
+                if logger:
+                    logger.log(f"{browser_id} ⏱️ {episode_key} TIMEOUT after {episode_timeout}s", "error")
+                if on_complete:
+                    on_complete(ep_num, season, False)
+                return False
 
             # Check again after processing (in case cancelled during download)
             if cancel_check and cancel_check():
@@ -2939,7 +2998,9 @@ def index():
         'default_quality': app_config.DEFAULT_QUALITY,
         'default_wait_time': app_config.DEFAULT_WAIT_TIME
     }
-    return render_template('index.html', config=config_values)
+    import hashlib, time
+    cache_bust = hashlib.md5(str(time.time()).encode()).hexdigest()[:8]
+    return render_template('index.html', config=config_values, cache_bust=cache_bust)
 
 
 @app.route('/api/start', methods=['POST'])
@@ -4024,14 +4085,31 @@ def retry_failed_episodes(session_id):
 
 @app.route('/api/queue/<session_id>', methods=['DELETE'])
 def cancel_queued_download(session_id):
-    """Cancel a queued download"""
-    # Update status to cancelled
-    success = queue_manager.update_status(session_id, DownloadStatus.CANCELLED)
+    """Cancel a queued or active download"""
+    cancelled = False
 
-    if success:
-        # Also update active_downloads
-        if session_id in active_downloads:
-            active_downloads[session_id]['status'] = 'cancelled'
+    # If actively processing, cancel via queue processor (stops thread + future)
+    if queue_processor.cancel_download(session_id):
+        cancelled = True
+        logger.info(f"Cancelled active download via processor: {session_id[:8]}")
+
+    # Update queue status to cancelled
+    if queue_manager.update_status(session_id, DownloadStatus.CANCELLED,
+                                    completed_at=datetime.now().isoformat()):
+        cancelled = True
+
+    # Also mark in active_downloads so the download loop sees cancellation
+    if session_id in active_downloads:
+        active_downloads[session_id]['status'] = 'cancelled'
+        cancelled = True
+
+    if cancelled:
+        # Emit status update via WebSocket for immediate UI update
+        socketio.emit('status', {
+            'session_id': session_id,
+            'status': 'cancelled',
+            'message': 'Download cancelled'
+        })
         return jsonify({'status': 'cancelled'})
 
     return jsonify({'error': 'Session not found'}), 404

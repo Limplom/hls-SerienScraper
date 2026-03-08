@@ -109,9 +109,8 @@ def save_to_cache(series_slug: str, data: Dict[str, Any]) -> bool:
 
         cache_file = get_cache_path(series_slug)
 
-        # Write to cache file with pretty formatting
         with open(cache_file, 'w', encoding='utf-8') as f:
-            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+            json.dump(cache_data, f, ensure_ascii=False, separators=(',', ':'))
 
         return True
     except Exception as e:
@@ -210,33 +209,26 @@ def get_cache_stats() -> Dict[str, Any]:
         total = 0
         valid = 0
         expired = 0
-        ongoing = 0
-        completed = 0
         total_size = 0
+        expiry_seconds = CACHE_EXPIRY_DAYS * 86400
+        now = datetime.now().timestamp()
 
         for cache_file in CACHE_DIR.glob("*.json"):
             # Skip catalog index files
-            if cache_file.name in ['catalog_index.json', 'anime_catalog_index.json']:
+            if cache_file.name in ('catalog_index.json', 'anime_catalog_index.json'):
                 continue
 
             try:
                 total += 1
-                total_size += cache_file.stat().st_size
+                stat = cache_file.stat()
+                total_size += stat.st_size
 
-                with open(cache_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-
-                if is_cache_valid(data):
+                # Use file mtime as proxy for cache validity instead of parsing JSON
+                file_age = now - stat.st_mtime
+                if file_age < expiry_seconds:
                     valid += 1
                 else:
                     expired += 1
-
-                # Count ongoing vs completed
-                if data.get('is_ongoing', True):
-                    ongoing += 1
-                else:
-                    completed += 1
-
             except Exception:
                 expired += 1
 
@@ -244,8 +236,6 @@ def get_cache_stats() -> Dict[str, Any]:
             "total_cached": total,
             "valid_cached": valid,
             "expired_cached": expired,
-            "ongoing_series": ongoing,
-            "completed_series": completed,
             "cache_size_mb": round(total_size / (1024 * 1024), 2)
         }
     except Exception:

@@ -7,6 +7,7 @@ import json
 import hashlib
 import time
 import logging
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
@@ -47,8 +48,8 @@ class CacheManager:
         self.metadata_dir.mkdir(parents=True, exist_ok=True)
         self.http_cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # In-memory cache for hot data (frequently accessed)
-        self._hot_cache: Dict[str, Dict[str, Any]] = {}
+        # In-memory cache for hot data (frequently accessed) - OrderedDict for efficient LRU
+        self._hot_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self._hot_cache_max_size = 100  # Max items in hot cache
 
         # Default TTLs
@@ -97,7 +98,7 @@ class CacheManager:
         }
 
         with open(cache_file, 'w', encoding='utf-8') as f:
-            json.dump(cache_data, f, indent=2, ensure_ascii=False)
+            json.dump(cache_data, f, separators=(',', ':'), ensure_ascii=False)
 
     def get_cached_episode(self, series_slug: str, season: int, episode: int) -> Optional[Dict[str, Any]]:
         """
@@ -275,7 +276,7 @@ class CacheManager:
         }
 
         with open(cache_file, 'w', encoding='utf-8') as f:
-            json.dump(cache_data, f, indent=2, ensure_ascii=False)
+            json.dump(cache_data, f, separators=(',', ':'), ensure_ascii=False)
 
     def get_cached_http_response(self, url: str) -> Optional[Any]:
         """
@@ -315,21 +316,20 @@ class CacheManager:
 
     def _add_to_hot_cache(self, key: str, data: Dict[str, Any]):
         """Add item to hot cache with LRU eviction"""
-        # Move to end if already exists (mark as recently used)
         if key in self._hot_cache:
-            self._hot_cache.pop(key)
-        elif len(self._hot_cache) >= self._hot_cache_max_size:
-            # Evict oldest (first) item
-            oldest_key = next(iter(self._hot_cache))
-            del self._hot_cache[oldest_key]
-
-        self._hot_cache[key] = data
+            # Move to end (mark as recently used) - O(1) with OrderedDict
+            self._hot_cache.move_to_end(key)
+            self._hot_cache[key] = data
+        else:
+            if len(self._hot_cache) >= self._hot_cache_max_size:
+                # Evict oldest (first) item - O(1) with OrderedDict
+                self._hot_cache.popitem(last=False)
+            self._hot_cache[key] = data
 
     def get_hot_cache_item(self, key: str) -> Optional[Any]:
         """Get item from hot cache (moves to end for LRU)"""
         if key in self._hot_cache:
-            # Move to end (recently accessed)
-            self._hot_cache[key] = self._hot_cache.pop(key)
+            self._hot_cache.move_to_end(key)
             return self._hot_cache[key]
         return None
 
@@ -370,36 +370,28 @@ class CacheManager:
     # ==========================================
 
     def get_cache_stats(self) -> Dict[str, Any]:
-        """Get cache statistics"""
-        stats = {
-            'images': {
-                'count': len(list(self.images_dir.glob('*'))),
-                'size_mb': self._get_dir_size(self.images_dir) / (1024 * 1024)
-            },
-            'metadata': {
-                'count': len(list(self.metadata_dir.glob('*.json'))),
-                'size_mb': self._get_dir_size(self.metadata_dir) / (1024 * 1024)
-            },
-            'http_responses': {
-                'count': len(list(self.http_cache_dir.glob('*.json'))),
-                'size_mb': self._get_dir_size(self.http_cache_dir) / (1024 * 1024)
-            },
-            'hot_cache': {
-                'count': len(self._hot_cache),
-                'max_size': self._hot_cache_max_size
-            },
-            'total_size_mb': self._get_dir_size(self.cache_dir) / (1024 * 1024)
+        """Get cache statistics (single pass per directory for efficiency)"""
+        img_count, img_size = self._get_dir_stats(self.images_dir)
+        meta_count, meta_size = self._get_dir_stats(self.metadata_dir, '*.json')
+        http_count, http_size = self._get_dir_stats(self.http_cache_dir, '*.json')
+
+        return {
+            'images': {'count': img_count, 'size_mb': img_size / (1024 * 1024)},
+            'metadata': {'count': meta_count, 'size_mb': meta_size / (1024 * 1024)},
+            'http_responses': {'count': http_count, 'size_mb': http_size / (1024 * 1024)},
+            'hot_cache': {'count': len(self._hot_cache), 'max_size': self._hot_cache_max_size},
+            'total_size_mb': (img_size + meta_size + http_size) / (1024 * 1024)
         }
 
-        return stats
-
-    def _get_dir_size(self, directory: Path) -> int:
-        """Get total size of directory in bytes"""
+    def _get_dir_stats(self, directory: Path, pattern: str = '*') -> tuple:
+        """Get count and total size of files in directory in a single pass."""
+        count = 0
         total_size = 0
-        for file in directory.rglob('*'):
-            if file.is_file():
-                total_size += file.stat().st_size
-        return total_size
+        for f in directory.glob(pattern):
+            if f.is_file():
+                count += 1
+                total_size += f.stat().st_size
+        return count, total_size
 
     # ==========================================
     # Cache cleanup

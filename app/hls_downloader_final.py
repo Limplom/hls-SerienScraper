@@ -75,6 +75,8 @@ class HLSExtractor:
         self.master_playlist = None
         self.metadata = VideoMetadata()
         self.ad_filters = set()
+        self._ad_filters_frozen = None  # frozenset for O(1) lookups
+        self._blocked_patterns_tuple = None  # tuple for faster iteration
         self._m3u8_event = None  # Event for instant m3u8 detection (created per extraction)
     
     # Filter update interval: 24 hours
@@ -137,26 +139,56 @@ class HLSExtractor:
         if updated_count > 0:
             logger.info(f"Updated {updated_count} filter list(s)")
         logger.info(f"Loaded {len(self.ad_filters)} filter rules from {len(filter_lists)} lists")
+        # Build frozenset for O(1) lookups during request interception
+        self._ad_filters_frozen = frozenset(self.ad_filters)
+        # Pre-build blocked patterns tuple for faster iteration
+        self._blocked_patterns_tuple = (
+            '/ads/', '/ad/', '/advert',
+            'doubleclick', 'googlesyndication',
+            'facebook.com/tr', 'facebook.net',
+            '/analytics.', '/tracking.',
+            '/banner', '/popup',
+        )
         return len(self.ad_filters) > 0
 
     def _parse_filter_file(self, cache_file: Path, name: str):
         """Parse a single adblock filter file and extract domain rules."""
         try:
+            filters = self.ad_filters
             with open(cache_file, 'r', encoding='utf-8', errors='ignore') as f:
                 for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('!') or line.startswith('['):
+                    # Quick prefix checks avoid strip() on most lines
+                    if not line or line[0] in ('!', '[', '\n', '\r'):
+                        continue
+
+                    line = line.rstrip()
+                    if not line:
                         continue
 
                     if '||' in line:
-                        domain = line.replace('||', '').split('^')[0].split('/')[0].split('$')[0]
-                        if domain and '.' in domain:
-                            self.ad_filters.add(domain.lower())
-                    elif line.startswith('|https://') or line.startswith('|http://'):
+                        # Extract domain: ||domain.com^ or ||domain.com/path$options
+                        start = line.index('||') + 2
+                        end = len(line)
+                        for ch_idx in range(start, end):
+                            ch = line[ch_idx]
+                            if ch in ('^', '/', '$'):
+                                end = ch_idx
+                                break
+                        domain = line[start:end]
+                        if '.' in domain:
+                            filters.add(domain.lower())
+                    elif line[:9] == '|https://' or line[:8] == '|http://':
                         try:
-                            domain = line.split('://')[1].split('/')[0].split('$')[0]
-                            if domain and '.' in domain:
-                                self.ad_filters.add(domain.lower())
+                            start = line.index('://') + 3
+                            end = len(line)
+                            for ch_idx in range(start, end):
+                                ch = line[ch_idx]
+                                if ch in ('/', '$'):
+                                    end = ch_idx
+                                    break
+                            domain = line[start:end]
+                            if '.' in domain:
+                                filters.add(domain.lower())
                         except (IndexError, ValueError):
                             pass
         except Exception as e:
@@ -663,41 +695,42 @@ class HLSExtractor:
 
                 blocked_count = [0]
 
+                # Cache references for faster access in hot path
+                _filters = self._ad_filters_frozen or frozenset(self.ad_filters)
+                _patterns = self._blocked_patterns_tuple or ()
+
                 async def block_ads_brave(route, request):
-                    url_lower = request.url.lower()
                     try:
+                        url_lower = request.url.lower()
                         parsed = urlparse(request.url)
                         domain = parsed.netloc.lower()
 
-                        if domain in self.ad_filters:
+                        # O(1) frozenset lookup instead of set
+                        if domain in _filters:
                             blocked_count[0] += 1
                             if blocked_count[0] <= 10:
                                 log(f"Blocked: {domain}", "debug")
                             await route.abort()
                             return
-                        
-                        domain_parts = domain.split('.')
-                        if len(domain_parts) > 2:
-                            parent_domain = '.'.join(domain_parts[-2:])
-                            if parent_domain in self.ad_filters:
+
+                        # Check parent domain
+                        dot_idx = domain.find('.')
+                        if dot_idx >= 0:
+                            parent = domain[dot_idx + 1:]
+                            if parent in _filters:
                                 blocked_count[0] += 1
                                 await route.abort()
                                 return
-                        
-                        blocked_patterns = [
-                            '/ads/', '/ad/', '/advert',
-                            'doubleclick', 'googlesyndication',
-                            'facebook.com/tr', 'facebook.net',
-                            '/analytics.', '/tracking.',
-                            '/banner', '/popup',
-                        ]
-                        
-                        if any(pattern in url_lower for pattern in blocked_patterns):
-                            blocked_count[0] += 1
-                            await route.abort()
-                            return
-                        
-                        if request.resource_type in ['font']:
+
+                        # Pre-built tuple for faster pattern matching
+                        if _patterns:
+                            for pattern in _patterns:
+                                if pattern in url_lower:
+                                    blocked_count[0] += 1
+                                    await route.abort()
+                                    return
+
+                        if request.resource_type == 'font':
                             await route.abort()
                             return
 
@@ -1093,6 +1126,7 @@ def parse_episode_range(episodes_str: str, max_episodes: int = 500) -> List[int]
 async def detect_series_info(url: str) -> Tuple[Optional[int], Optional[List[int]]]:
     """
     Detect number of seasons and episodes from series page.
+    Uses SingleBrowserScraper for efficient single-page extraction.
 
     Args:
         url: URL of the series page
@@ -1100,45 +1134,31 @@ async def detect_series_info(url: str) -> Tuple[Optional[int], Optional[List[int
     Returns:
         Tuple of (total_seasons, list_of_episodes) or (None, None) on error
     """
-    from playwright.async_api import async_playwright
-
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=['--mute-audio']
-            )
-            page = await browser.new_page()
+        from app.browser_pool import SingleBrowserScraper
+        scraper = SingleBrowserScraper(headless=True)
+        data = await scraper.scrape_page(url, '''
+            () => {
+                let totalSeasons = null;
+                const seasonsMeta = document.querySelector('meta[itemprop="numberOfSeasons"]');
+                if (seasonsMeta) totalSeasons = parseInt(seasonsMeta.getAttribute('content'));
 
-            await page.goto(url, wait_until="domcontentloaded")
+                const episodes = new Set();
+                document.querySelectorAll('a[href*="/episode-"]').forEach(link => {
+                    const href = link.getAttribute('href');
+                    if (href) {
+                        const match = href.match(/\\/episode-(\\d+)/);
+                        if (match) episodes.add(parseInt(match[1]));
+                    }
+                });
 
-            # Get number of seasons
-            total_seasons = None
-            try:
-                seasons_meta = await page.query_selector('meta[itemprop="numberOfSeasons"]')
-                if seasons_meta:
-                    total_seasons = int(await seasons_meta.get_attribute('content'))
-            except Exception as e:
-                logger.debug(f"Could not extract number of seasons: {e}")
-
-            # Get episodes for current season (if on season page)
-            episodes = []
-            try:
-                # Find all episode links
-                episode_links = await page.query_selector_all('a[href*="/episode-"]')
-                for link in episode_links:
-                    href = await link.get_attribute('href')
-                    if href:
-                        match = re.search(r'/episode-(\d+)', href)
-                        if match:
-                            episodes.append(int(match.group(1)))
-            except Exception as e:
-                logger.debug(f"Could not extract episode list: {e}")
-
-            await browser.close()
-
-            return total_seasons, sorted(set(episodes)) if episodes else None
-
+                return {
+                    totalSeasons: totalSeasons,
+                    episodes: Array.from(episodes).sort((a, b) => a - b)
+                };
+            }
+        ''')
+        return data.get('totalSeasons'), data.get('episodes') or None
     except Exception as e:
         logger.warning(f"Could not auto-detect series info: {e}")
         return None, None

@@ -34,6 +34,10 @@ function scheduleStatisticsUpdate() {
     }, STATISTICS_DEBOUNCE_MS);
 }
 
+// Throttle episode status updates to prevent DOM thrashing
+const _episodeStatusThrottleMap = new Map();
+const EPISODE_STATUS_THROTTLE_MS = 150;
+
 // Find download card/container by session ID (uses cache for performance)
 function findDownloadCard(sessionId) {
     const shortId = sessionId.substring(0, 8);
@@ -349,45 +353,69 @@ function initializeWebSocket() {
         }
     });
 
-    // Handler for individual episode status updates (real-time)
+    // Handler for individual episode status updates (real-time, throttled for downloading)
     socket.on('episode_status_update', function(data) {
         const { session_id, episode_key, status, progress } = data;
-        const shortSessionId = session_id.substring(0, 8);
+        const throttleKey = `${session_id}_${episode_key}`;
 
-        // Find the specific episode row (new horizontal layout)
-        const episodeRow = document.querySelector(
-            `.episode-row[data-episode="${episode_key}"][data-session="${shortSessionId}"]`
-        );
-
-        if (episodeRow) {
-            // Update status class
-            const oldClasses = Array.from(episodeRow.classList).filter(c => !c.startsWith('episode-status-'));
-            episodeRow.className = [...oldClasses, `episode-status-${status}`].join(' ');
-
-            // Update status icon
-            const statusIcon = episodeRow.querySelector('.episode-status-icon');
-            if (statusIcon) {
-                statusIcon.textContent = getEpisodeStatusIcon(status);
+        // Throttle "downloading" progress updates to reduce DOM thrashing
+        if (status === 'downloading') {
+            if (_episodeStatusThrottleMap.has(throttleKey)) {
+                // Store latest data for next update
+                _episodeStatusThrottleMap.get(throttleKey).pendingData = data;
+                return;
             }
+            _episodeStatusThrottleMap.set(throttleKey, { pendingData: null });
+            setTimeout(() => {
+                const entry = _episodeStatusThrottleMap.get(throttleKey);
+                _episodeStatusThrottleMap.delete(throttleKey);
+                if (entry && entry.pendingData) {
+                    _applyEpisodeStatusUpdate(entry.pendingData);
+                }
+            }, EPISODE_STATUS_THROTTLE_MS);
+        }
 
-            // Update progress bar
-            const progressFill = episodeRow.querySelector('.episode-progress-fill');
-            if (progressFill) {
-                progressFill.style.width = `${progress}%`;
-            }
+        _applyEpisodeStatusUpdate(data);
+    });
+}
 
-            // Update progress text
-            const progressText = episodeRow.querySelector('.episode-progress-text');
-            if (progressText) {
-                progressText.textContent = `${progress.toFixed(0)}%`;
-            }
+function _applyEpisodeStatusUpdate(data) {
+    const { session_id, episode_key, status, progress } = data;
+    const shortSessionId = session_id.substring(0, 8);
 
-            // Update action button based on new status
+    // Find the specific episode row (new horizontal layout)
+    const episodeRow = document.querySelector(
+        `.episode-row[data-episode="${episode_key}"][data-session="${shortSessionId}"]`
+    );
+
+    if (episodeRow) {
+        // Update status class
+        const oldClasses = Array.from(episodeRow.classList).filter(c => !c.startsWith('episode-status-'));
+        episodeRow.className = [...oldClasses, `episode-status-${status}`].join(' ');
+
+        // Update status icon
+        const statusIcon = episodeRow.querySelector('.episode-status-icon');
+        if (statusIcon) {
+            statusIcon.textContent = getEpisodeStatusIcon(status);
+        }
+
+        // Update progress bar
+        const progressFill = episodeRow.querySelector('.episode-progress-fill');
+        if (progressFill) {
+            progressFill.style.width = `${progress}%`;
+        }
+
+        // Update progress text
+        const progressText = episodeRow.querySelector('.episode-progress-text');
+        if (progressText) {
+            progressText.textContent = `${progress.toFixed(0)}%`;
+        }
+
+        // Update action button based on new status (skip for downloading to reduce DOM churn)
+        if (status !== 'downloading') {
             const actionsDiv = episodeRow.querySelector('.episode-actions');
             if (actionsDiv) {
-                if (status === 'downloading') {
-                    actionsDiv.innerHTML = `<button class="episode-action-btn btn-stop" onclick="stopEpisode('${session_id}', '${episode_key}', event)" title="Stop episode">⏹</button>`;
-                } else if (status === 'queued') {
+                if (status === 'queued') {
                     actionsDiv.innerHTML = `<button class="episode-action-btn btn-cancel" onclick="cancelEpisode('${session_id}', '${episode_key}', event)" title="Cancel episode">✕</button>`;
                 } else {
                     actionsDiv.innerHTML = '';  // Completed or failed - no action
@@ -406,7 +434,7 @@ function initializeWebSocket() {
                 if (handle) handle.remove();
             }
         }
-    });
+    }
 }
 
 // Start download
@@ -712,6 +740,9 @@ function updateDownloadProgress(data) {
     }
 }
 
+// Maximum log entries to keep in DOM to prevent browser lag
+const MAX_LOG_ENTRIES = 500;
+
 // Add log entry
 function addLog(message, level = 'info', updateLast = false, isProgress = false) {
     const logContainer = document.getElementById('logContainer');
@@ -719,9 +750,8 @@ function addLog(message, level = 'info', updateLast = false, isProgress = false)
     // If this is a progress update, update the last progress entry
     if (updateLast && isProgress) {
         // Find the last progress entry
-        const entries = logContainer.querySelectorAll('.log-entry.progress');
-        if (entries.length > 0) {
-            const lastEntry = entries[entries.length - 1];
+        const lastEntry = logContainer.querySelector('.log-entry.progress:last-of-type');
+        if (lastEntry) {
             // Update timestamp and message
             const now = new Date();
             const timestamp = now.toTimeString().split(' ')[0];
@@ -749,6 +779,11 @@ function addLog(message, level = 'info', updateLast = false, isProgress = false)
     entry.textContent = `[${timestamp}] ${message}`;
 
     logContainer.appendChild(entry);
+
+    // Trim old entries to prevent DOM bloat
+    while (logContainer.childElementCount > MAX_LOG_ENTRIES) {
+        logContainer.removeChild(logContainer.firstChild);
+    }
 
     // Auto-scroll to bottom
     if (autoScroll) {
@@ -1302,14 +1337,24 @@ function showEpisodeSelector(episodes, season, episodeDetails = {}) {
 
     currentSelectedSeason = season;
 
-    // Episodes label and buttons (like "Episoden: 1 2 3 4 5...")
+    // Check which episodes are already downloaded
+    const downloadedEpisodes = new Set(getDownloadedEpisodes(season));
+    const downloadedCount = episodes.filter(ep => downloadedEpisodes.has(ep)).length;
+
+    // Episodes label with downloaded counter
     const episodesTabsContainer = document.createElement('div');
     episodesTabsContainer.className = 'episodes-tabs-container';
 
     const episodesLabel = document.createElement('span');
     episodesLabel.className = 'tabs-label';
-    episodesLabel.textContent = 'Episodes:';
+    episodesLabel.innerHTML = `Episodes (Season ${season}): `;
     episodesTabsContainer.appendChild(episodesLabel);
+
+    const dlBadge = document.createElement('span');
+    dlBadge.className = 'episodes-downloaded-badge' + (downloadedCount > 0 ? '' : ' none-downloaded');
+    dlBadge.textContent = `${downloadedCount}/${episodes.length}`;
+    dlBadge.title = `${downloadedCount} of ${episodes.length} episodes already downloaded`;
+    episodesTabsContainer.appendChild(dlBadge);
 
     const episodesTabsDiv = document.createElement('div');
     episodesTabsDiv.className = 'episode-tabs';
@@ -1317,14 +1362,22 @@ function showEpisodeSelector(episodes, season, episodeDetails = {}) {
     episodes.forEach(epNum => {
         const epButton = document.createElement('button');
         epButton.className = 'episode-tab';
-        epButton.textContent = epNum;
         epButton.dataset.episode = epNum;
 
-        // Add title as tooltip if available
+        // Mark downloaded episodes
+        if (downloadedEpisodes.has(epNum)) {
+            epButton.classList.add('downloaded');
+            epButton.textContent = epNum;
+            epButton.title = `Episode ${epNum} — already downloaded`;
+        } else {
+            epButton.textContent = epNum;
+        }
+
+        // Add title as tooltip if available (override downloaded tooltip)
         if (episodeDetails[epNum]) {
             const title = episodeDetails[epNum].title_de || episodeDetails[epNum].title_en;
             if (title) {
-                epButton.title = title;
+                epButton.title = title + (downloadedEpisodes.has(epNum) ? ' (downloaded)' : '');
             }
         }
 
@@ -1523,6 +1576,13 @@ function showSeasonSelector(totalSeasons, currentSeason = null) {
         const seasonTab = document.createElement('button');
         seasonTab.className = 'season-tab';
         seasonTab.textContent = seasonNum;
+
+        // Mark seasons that have downloaded episodes
+        const dlEps = getDownloadedEpisodes(seasonNum);
+        if (dlEps.length > 0) {
+            seasonTab.classList.add('has-downloads');
+            seasonTab.title = `Season ${seasonNum} — ${dlEps.length} episode(s) downloaded`;
+        }
 
         // Highlight current/first season
         if (seasonNum === (currentSeason || 1)) {
@@ -1842,12 +1902,20 @@ function showEpisodesForSeason(identifier, type = 'season') {
     const selectionKey = type === 'extra' ? `extra_${identifier}` : identifier;
     const selectedEpisodes = selectedEpisodesPerSeason[selectionKey] || [];
 
+    // Check downloaded episodes for this season
+    const seasonNum = type === 'season' ? identifier : 0;
+    const downloadedEpisodes = new Set(getDownloadedEpisodes(seasonNum));
+    const downloadedCount = episodes.filter(ep => downloadedEpisodes.has(ep)).length;
+
     const episodeLabel = document.createElement('div');
     episodeLabel.className = 'selector-label';
     episodeLabel.innerHTML = `
         Episodes (${labelText}):
         <span class="episode-count-badge">${selectedEpisodes.length}/${episodes.length}</span>
     `;
+    if (downloadedCount > 0) {
+        episodeLabel.innerHTML += ` <span class="episodes-downloaded-badge">${downloadedCount}/${episodes.length}</span>`;
+    }
     container.appendChild(episodeLabel);
 
     // Episode buttons
@@ -1860,6 +1928,11 @@ function showEpisodesForSeason(identifier, type = 'season') {
         epButton.textContent = epNum;
         epButton.dataset.episode = epNum;
 
+        // Mark downloaded episodes
+        if (downloadedEpisodes.has(epNum)) {
+            epButton.classList.add('downloaded');
+        }
+
         // Check if already selected
         if (selectedEpisodes.includes(epNum)) {
             epButton.classList.add('selected');
@@ -1869,8 +1942,10 @@ function showEpisodesForSeason(identifier, type = 'season') {
         if (itemData.episode_details && itemData.episode_details[epNum]) {
             const title = itemData.episode_details[epNum].title_de || itemData.episode_details[epNum].title_en;
             if (title) {
-                epButton.title = title;
+                epButton.title = title + (downloadedEpisodes.has(epNum) ? ' (downloaded)' : '');
             }
+        } else if (downloadedEpisodes.has(epNum)) {
+            epButton.title = `Episode ${epNum} — already downloaded`;
         }
 
         epButton.onclick = function() {
@@ -2072,14 +2147,21 @@ function startQueuePolling() {
 }
 
 // Update queue status from API
+let _lastDuplicateCheck = 0;
+const DUPLICATE_CHECK_INTERVAL_MS = 10000; // Check duplicates every 10s, not every poll
+
 async function updateQueueStatus() {
     try {
         const response = await fetch('/api/queue');
         const data = await response.json();
         renderQueue(data);
 
-        // Check for duplicate series entries
-        checkForDuplicates();
+        // Check for duplicate series entries (throttled - every 10s instead of every 2s)
+        const now = Date.now();
+        if (now - _lastDuplicateCheck > DUPLICATE_CHECK_INTERVAL_MS) {
+            _lastDuplicateCheck = now;
+            checkForDuplicates();
+        }
 
         // Auto-stop polling when no active downloads remain
         const hasActive = data.items.some(item =>
@@ -4177,26 +4259,46 @@ function getLibraryMatch(seriesName) {
     if (!seriesName || Object.keys(libraryData).length === 0) return null;
 
     const normalized = seriesName.trim().toLowerCase();
-
-    // Exact match
-    if (libraryData[normalized]) return libraryData[normalized];
-
-    // Check if series name is contained in library key or vice versa
-    for (const [key, data] of Object.entries(libraryData)) {
-        if (key.includes(normalized) || normalized.includes(key)) {
-            return data;
-        }
-    }
-
-    // Slug-based match: "my-series-name" -> "my series name"
     const slugNormalized = normalized.replace(/-/g, ' ');
-    if (libraryData[slugNormalized]) return libraryData[slugNormalized];
 
-    for (const [key, data] of Object.entries(libraryData)) {
-        if (key.includes(slugNormalized) || slugNormalized.includes(key)) {
-            return data;
+    // Try both normalized and slug-normalized forms
+    const variants = [normalized, slugNormalized];
+
+    for (const variant of variants) {
+        // Exact match
+        if (libraryData[variant]) return libraryData[variant];
+
+        // Substring match (name in key or key in name)
+        for (const [key, data] of Object.entries(libraryData)) {
+            if (key === variant || key.includes(variant) || variant.includes(key)) {
+                return data;
+            }
         }
     }
 
     return null;
+}
+
+function getDownloadedEpisodes(seasonNum) {
+    // Try all possible name sources for matching
+    const candidates = [
+        document.getElementById('series_display')?.value?.trim(),
+        cachedSeriesData?.series_name,
+        parsedUrlData?.series_name,
+        parsedUrlData?.series_slug
+    ].filter(Boolean);
+
+    if (candidates.length === 0 || Object.keys(libraryData).length === 0) return [];
+
+    for (const name of candidates) {
+        const match = getLibraryMatch(name);
+        if (match && match.seasons) {
+            const seasonData = match.seasons[String(seasonNum)];
+            if (seasonData?.episodes?.length > 0) {
+                return seasonData.episodes;
+            }
+        }
+    }
+
+    return [];
 }

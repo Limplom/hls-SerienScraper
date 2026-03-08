@@ -59,7 +59,7 @@ def main():
     check_dependencies()
 
     # Import and run the web GUI
-    from app.web_gui import app, socketio
+    from app.web_gui import app, socketio, graceful_shutdown
 
     # Configurable server settings via environment variables
     DEBUG = os.getenv('FLASK_DEBUG', 'false').lower() == 'true'
@@ -79,7 +79,17 @@ def main():
     print("=" * 60)
     print()
 
-    socketio.run(app, debug=DEBUG, host=HOST, port=PORT)
+    import signal
+
+    def handle_exit(signum, frame):
+        print("\nShutting down...")
+        graceful_shutdown()
+        os._exit(0)
+
+    signal.signal(signal.SIGINT, handle_exit)
+    signal.signal(signal.SIGTERM, handle_exit)
+
+    socketio.run(app, debug=DEBUG, host=HOST, port=PORT, allow_unsafe_werkzeug=True)
 
 if __name__ == '__main__':
     main()
