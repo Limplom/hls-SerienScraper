@@ -20,8 +20,16 @@ from typing import List, Optional, Dict
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 from app.config import Config
+from app.stealth import STEALTH_INIT_JS
 
 logger = logging.getLogger(__name__)
+
+
+def _launch_proxy_kwargs() -> dict:
+    """Return proxy kwargs for chromium.launch() if Surfshark VPN is enabled, else {}."""
+    if not Config.vpn_enabled():
+        return {}
+    return {"proxy": {"server": f"socks5://127.0.0.1:{Config.SURFSHARK_SOCKS_PORT}"}}
 
 
 # Optimized browser launch arguments for speed and stability
@@ -116,7 +124,8 @@ class BrowserPool:
 
             self.browser = await self.playwright.chromium.launch(
                 headless=self.headless,
-                args=BROWSER_ARGS
+                args=BROWSER_ARGS,
+                **_launch_proxy_kwargs(),
             )
 
             for i in range(self.pool_size):
@@ -147,8 +156,14 @@ class BrowserPool:
             user_agent=ua,
             java_script_enabled=True,
             ignore_https_errors=True,
-            bypass_csp=True
+            bypass_csp=True,
+            locale="de-DE",
+            timezone_id="Europe/Berlin",
+            extra_http_headers={"Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7"},
         )
+
+        # Inject stealth patches before any page JS runs
+        await context.add_init_script(STEALTH_INIT_JS)
 
         # Block unnecessary resources for faster loading
         await context.route("**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot}",
@@ -434,14 +449,20 @@ class SingleBrowserScraper:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=self.headless,
-                args=BROWSER_ARGS
+                args=BROWSER_ARGS,
+                **_launch_proxy_kwargs(),
             )
 
             try:
                 context = await browser.new_context(
                     viewport={'width': 1920, 'height': 1080},
-                    user_agent=USER_AGENTS[0]
+                    user_agent=USER_AGENTS[0],
+                    locale="de-DE",
+                    timezone_id="Europe/Berlin",
+                    extra_http_headers={"Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7"},
                 )
+
+                await context.add_init_script(STEALTH_INIT_JS)
 
                 await context.route("**/*.{png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot}",
                                    lambda route: route.abort())

@@ -9,3 +9,11 @@ download_queue.json
 /bin
 config/.secret_key
 config/library.json
+
+.env*
+!.env.example
+gluetun-data/
+probe_*.py
+probe_*.html
+probe_out_*/
+probe_stealth_*/

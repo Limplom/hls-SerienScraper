@@ -29,8 +29,12 @@ if sys.platform == 'win32':
 # Import config for browser settings
 try:
     from app import config as app_config
+    from app.stealth import STEALTH_INIT_JS, is_turnstile_active
 except ImportError:
     app_config = None  # Fallback when running standalone
+    STEALTH_INIT_JS = ""
+    def is_turnstile_active(_page):
+        return False
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -397,11 +401,41 @@ class HLSExtractor:
         """Klickt den Play-Button - OPTIMIERT mit wait_for_selector"""
         logger.info("Looking for Play button...")
 
-        # Scroll um iframe im Viewport zu haben
+        # Scroll iframe into viewport first
         try:
-            await page.evaluate("window.scrollBy(0, 200)")
+            await page.evaluate("""() => {
+                const ifr = document.getElementById('player-iframe')
+                          || document.querySelector('.inSiteWebStream iframe');
+                if (ifr) ifr.scrollIntoView({block: 'center', behavior: 'instant'});
+                else window.scrollBy(0, 200);
+            }""")
         except Exception as e:
             logger.debug(f"Scroll failed: {e}")
+
+        # Pre-click on the player iframe to satisfy VOE's user-gesture requirement.
+        # Without this, the cross-origin player frame never renders its <video>
+        # element, even with --autoplay-policy=no-user-gesture-required.
+        try:
+            ifr_el = await page.query_selector('#player-iframe, .inSiteWebStream iframe')
+            if ifr_el:
+                box = await ifr_el.bounding_box()
+                if box:
+                    cx = box['x'] + box['width'] / 2
+                    cy = box['y'] + box['height'] / 2
+                    pages_before = len(context.pages)
+                    await page.mouse.click(cx, cy)
+                    logger.info(f"Pre-clicked player iframe at ({cx:.0f}, {cy:.0f}) to wake up video element")
+                    await asyncio.sleep(0.4)
+                    # Close any popup tabs the click triggered
+                    if len(context.pages) > pages_before:
+                        for popup in context.pages[pages_before:]:
+                            try:
+                                await popup.close()
+                            except Exception:
+                                pass
+                        logger.debug(f"Closed {len(context.pages) - pages_before} popup tab(s) after iframe click")
+        except Exception as e:
+            logger.debug(f"Iframe pre-click failed: {e}")
 
         # OPTIMIERT: Warte auf Video-Frame mit wait_for_selector statt fester 5s
         logger.info("Waiting for video iframe to load (smart wait)...")
@@ -647,10 +681,13 @@ class HLSExtractor:
                     '--window-size=1280,720'
                 ])
 
-            browser = await p.chromium.launch(
-                headless=headless,
-                args=browser_args
-            )
+            launch_kwargs = {"headless": headless, "args": browser_args}
+            if app_config and app_config.Config.vpn_enabled():
+                socks_port = app_config.Config.SURFSHARK_SOCKS_PORT
+                launch_kwargs["proxy"] = {"server": f"socks5://127.0.0.1:{socks_port}"}
+                log(f"VPN proxy enabled: socks5://127.0.0.1:{socks_port}")
+
+            browser = await p.chromium.launch(**launch_kwargs)
 
             # Context mit MUTED Audio (kein Ton nötig!)
             context = await browser.new_context(
@@ -658,10 +695,17 @@ class HLSExtractor:
                 is_mobile=False,
                 has_touch=False,
                 permissions=[],
+                locale="de-DE",
+                timezone_id="Europe/Berlin",
                 extra_http_headers={
                     'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7'
                 }
             )
+
+            # Stealth fingerprint patches (must run BEFORE page JS)
+            if STEALTH_INIT_JS:
+                await context.add_init_script(STEALTH_INIT_JS)
+
             page = await context.new_page()
 
             # Stumm schalten via JavaScript - mehrere Methoden kombiniert
@@ -703,6 +747,34 @@ class HLSExtractor:
                     try:
                         url_lower = request.url.lower()
                         parsed = urlparse(request.url)
+
+                        # ============================================================
+                        # PLAYER WHITELIST — never block resources required for the
+                        # video player to work, even if EasyList flags the wrapper
+                        # domain. The wrappers (e.g. maryspecialwatch.com,
+                        # charlessheimprove.com) rotate per session, so we whitelist
+                        # by URL pattern + frame origin instead of a domain list.
+                        # ============================================================
+                        # Stream resources themselves
+                        if any(seg in url_lower for seg in (
+                            '.m3u8', '.ts?', '/master.m3u8', '.mp4', '.mpd',
+                            '/hls/', '/hls2-c/', '/hls2/', '/dash/',
+                            '/engine/hls', '/engine/jwplayer', '/engine/hls2-c',
+                        )):
+                            await route.continue_()
+                            return
+                        # Player-iframe URL pattern: /e/<id>, /embed/<id>
+                        if '/e/' in parsed.path or '/embed/' in parsed.path:
+                            await route.continue_()
+                            return
+                        # Requests originating from inside the player frame (any
+                        # frame whose URL has /e/ pattern is the player wrapper)
+                        try:
+                            if request.frame and '/e/' in (request.frame.url or ''):
+                                await route.continue_()
+                                return
+                        except Exception:
+                            pass
                         domain = parsed.netloc.lower()
 
                         # O(1) frozenset lookup instead of set
@@ -829,6 +901,51 @@ class HLSExtractor:
             except Exception as e:
                 logger.debug(f"Could not extract English title: {e}")
 
+            # ============================================================
+            # NEW SCHEMA — s.to Bootstrap/Vite rewrite (May 2026)
+            # Single JS pull extracts series + "S04E01: German (English)" block
+            # in one round-trip. Fills only fields still empty from old schema,
+            # so aniworld.to (old) keeps working unchanged.
+            # ============================================================
+            try:
+                new_meta = await page.evaluate("""() => {
+                    const h1 = document.querySelector('h1.h2.fw-bold')
+                            || document.querySelector('article h1')
+                            || document.querySelector('h1.h2');
+                    const h2 = document.querySelector('article h2.h4')
+                            || document.querySelector('article h2');
+                    return {
+                        series: h1 ? h1.innerText.trim() : null,
+                        block:  h2 ? h2.innerText.trim() : null,
+                    };
+                }""")
+
+                if not self.metadata.series_name and new_meta.get('series'):
+                    self.metadata.series_name = new_meta['series']
+                    self.metadata.series_name_display = self.metadata.series_name
+                    log(f"Series (new schema): {self.metadata.series_name}")
+
+                block = new_meta.get('block') or ''
+                # Normalize whitespace (innerText preserves indentation in source HTML)
+                normalized = re.sub(r'\s+', ' ', block).strip()
+                # Pattern: "S04E01: <German title> (<English title>)"
+                m = re.search(r'S(\d{1,3})E(\d{1,3}):\s*(.+?)\s*\(([^)]+)\)\s*$', normalized)
+                if m:
+                    if not self.metadata.season:
+                        self.metadata.season = str(int(m.group(1)))
+                        log(f"Season (new schema): {self.metadata.season}")
+                    if not self.metadata.episode:
+                        self.metadata.episode = str(int(m.group(2)))
+                        log(f"Episode (new schema): {self.metadata.episode}")
+                    if not self.metadata.episode_title_german:
+                        self.metadata.episode_title_german = m.group(3).strip()
+                        log(f"German Title (new schema): {self.metadata.episode_title_german}")
+                    if not self.metadata.episode_title_english:
+                        self.metadata.episode_title_english = m.group(4).strip()
+                        log(f"English Title (new schema): {self.metadata.episode_title_english}")
+            except Exception as e:
+                logger.debug(f"New-schema metadata extraction failed: {e}")
+
             if not self.metadata.series_name:
                 self._parse_url_fallback(url)
 
@@ -916,7 +1033,7 @@ class HLSExtractor:
 
                         # Get current iframe src before clicking
                         iframe_before = await page.evaluate('''() => {
-                            const iframe = document.querySelector('.inSiteWebStream iframe');
+                            const iframe = document.querySelector('#player-iframe, .inSiteWebStream iframe');
                             return iframe ? iframe.src : null;
                         }''')
                         log(f"Current iframe: {iframe_before[:60] if iframe_before else 'none'}...", "debug")
@@ -1000,7 +1117,7 @@ class HLSExtractor:
 
                         # Verify iframe changed
                         iframe_after = await page.evaluate('''() => {
-                            const iframe = document.querySelector('.inSiteWebStream iframe');
+                            const iframe = document.querySelector('#player-iframe, .inSiteWebStream iframe');
                             return iframe ? iframe.src : null;
                         }''')
                         if iframe_after and iframe_before and iframe_after != iframe_before:
@@ -1040,9 +1157,13 @@ class HLSExtractor:
             # ============================================================
             # PLAY BUTTON KLICKEN (role='button' mit "Spielen" Text!)
             # ============================================================
-            
+
+            if is_turnstile_active(page):
+                log("Cloudflare Turnstile detected — IP reputation low. "
+                    "Player iframe will not load. Rotate VPN (vpn.rotate()) and retry.", "warning")
+
             play_clicked = await self.click_play_button(page, context)
-            
+
             if not play_clicked:
                 logger.warning("Play button not clicked - video might auto-play or need manual start")
             
@@ -1063,7 +1184,11 @@ class HLSExtractor:
                 log("Closing browser to free resources...")
             except asyncio.TimeoutError:
                 log(f"No m3u8 found after {wait_time}s", "error")
-                log("Try: 1. Increase --wait to 70 or 80, 2. Check if video started playing in browser, 3. Try without --no-adblock", "error")
+                if is_turnstile_active(page):
+                    log("ROOT CAUSE: Cloudflare Turnstile is gating the player. "
+                        "Rotate Surfshark to a fresh country and retry.", "error")
+                else:
+                    log("Try: 1. Increase --wait to 70 or 80, 2. Check if video started playing in browser, 3. Try without --no-adblock", "error")
 
             if use_adblock and blocked_count[0] > 10:
                 log(f"Total blocked: {blocked_count[0]} requests")

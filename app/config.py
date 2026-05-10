@@ -178,6 +178,19 @@ class Config:
     ANIME_BASE_URL = os.getenv('ANIME_BASE_URL', 'https://aniworld.to')
 
     # ===========================================
+    # SURFSHARK VPN (optional)
+    # If SURFSHARK_PRIVATE_KEY is empty, VPN integration is disabled.
+    # ===========================================
+    SURFSHARK_PRIVATE_KEY = os.getenv('SURFSHARK_PRIVATE_KEY', '').strip()
+    SURFSHARK_ADDRESS = os.getenv('SURFSHARK_ADDRESS', '10.14.0.2/16').strip()
+    SURFSHARK_COUNTRY = os.getenv('SURFSHARK_COUNTRY', 'DE').strip()
+    SURFSHARK_SOCKS_PORT = int(os.getenv('SURFSHARK_SOCKS_PORT', '1080'))
+
+    @classmethod
+    def vpn_enabled(cls) -> bool:
+        return bool(cls.SURFSHARK_PRIVATE_KEY)
+
+    # ===========================================
     # FLASK SETTINGS
     # ===========================================
 
