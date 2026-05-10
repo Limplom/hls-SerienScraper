@@ -1,8 +1,9 @@
-/__pycache__
+__pycache__/
+*.pyc
+*.pyo
 /series_cache
 download_queue.json
 /venv
-/app/__pycache__
 /filter_cache
 /.claude
 /Downloads
