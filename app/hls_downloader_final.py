@@ -984,6 +984,15 @@ class HLSExtractor:
                     }''')
                     log(f"Available languages: {available_langs}", "debug")
 
+                    # Fast-fail: the new s.to schema (May 2026 Vite rewrite) dropped
+                    # .changeLanguageBox img[data-lang-key] entirely. Without this
+                    # guard, the retry loop below burns 5s+ on every language=... call
+                    # before silently giving up.
+                    if not available_langs:
+                        log(f"Language switching not supported on this page schema; "
+                            f"default hoster language will be used (requested: {language}).",
+                            "warning")
+
                     # Find the language image with the specified data-lang-key
                     lang_selector = f'.changeLanguageBox img[data-lang-key="{language}"]'
 
@@ -1038,8 +1047,10 @@ class HLSExtractor:
                         }''')
                         log(f"Current iframe: {iframe_before[:60] if iframe_before else 'none'}...", "debug")
 
-                        # STEP 1: Click the language FLAG to make hosters for that language visible
-                        max_attempts = 5
+                        # STEP 1: Click the language FLAG to make hosters for that language visible.
+                        # If the page exposed no legacy flags at all (available_langs empty),
+                        # skip the retry loop entirely — it can't succeed and burns 5s.
+                        max_attempts = 5 if available_langs else 0
                         language_flag_changed = False
 
                         for attempt in range(max_attempts):
