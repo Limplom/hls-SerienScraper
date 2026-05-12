@@ -1,0 +1,17 @@
+# Direct runtime dependencies. Transitive packages (jinja2, werkzeug, etc.)
+# are resolved by pip. Pinned to >=current with major-version upper bounds
+# to allow patch/minor updates without breaking-change risk.
+#
+# Setup: pip install -r requirements.txt && playwright install chromium
+#
+# After install: see .env.example for optional Surfshark VPN config.
+
+Flask>=3.1,<4.0
+Flask-SocketIO>=5.6,<6.0
+playwright>=1.58,<2.0
+requests>=2.32,<3.0
+python-dotenv>=1.2,<2.0
+
+# yt-dlp uses calendar versioning (YYYY.MM.DD), so no semver upper bound.
+# Newer is almost always better — keep updated for fresh extractor patches.
+yt-dlp>=2026.2
