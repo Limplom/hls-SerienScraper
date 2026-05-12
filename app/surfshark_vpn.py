@@ -157,10 +157,6 @@ class SurfsharkVPN:
         await self._stop_wireproxy()
         self._current = None
 
-    async def public_ip(self) -> str:
-        """Resolve current public IP through the proxy. Useful for sanity checks."""
-        return await asyncio.to_thread(self._http_get_text_via_proxy, "https://ifconfig.io")
-
     def _write_config(self, server: SurfsharkServer):
         # wireproxy config: WireGuard [Interface] + [Peer], plus its own [Socks5] section
         config = (
@@ -223,16 +219,6 @@ class SurfsharkVPN:
         req = urllib.request.Request(url, headers={"User-Agent": "hls-scraper/1.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8"))
-
-    def _http_get_text_via_proxy(self, url: str) -> str:
-        # urllib doesn't speak SOCKS5 natively. Use HTTP CONNECT through wireproxy?
-        # wireproxy's [Socks5] is SOCKS5-only, no HTTP. So we use a tiny socks client via socket.
-        # For simplicity here: skip — caller can use Playwright with proxy, or curl --socks5.
-        # Returning a hint instead of failing silently keeps the API honest.
-        raise NotImplementedError(
-            "Use Playwright with proxy=self.proxy_url, or shell out to "
-            f"curl --socks5 127.0.0.1:{self.socks_port} {url}"
-        )
 
 
 def from_config() -> Optional[SurfsharkVPN]:
